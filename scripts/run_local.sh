@@ -7,7 +7,7 @@ models=("gpt2")
 tasks=("addition")
 top_ks=(50)
 digits_list=(3)
-num_examples_list=(100)
+num_examples_list=(10)
 
 # Enumerate combinations
 for model in "${models[@]}"; do
