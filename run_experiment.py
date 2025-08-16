@@ -53,32 +53,36 @@ def parse_args() -> argparse.Namespace:
         help="List of model names.",
     )
     parser.add_argument(
-        "--tasks",
-        nargs="+",
-        type=str,
-        required=True,
-        help="List of tasks.",
+    "--task",
+    "--tasks",
+    dest="task",
+    type=str,
+    required=True,
+    help="Single task.",
     )
     parser.add_argument(
-        "--num_examples_list",
-        nargs="+",
-        type=int,
-        required=True,
-        help="List of num_examples values.",
+    "--num_examples",
+    "--num_examples_list",
+    dest="num_examples",
+    type=int,
+    required=True,
+    help="Single num_examples value.",
     )
     parser.add_argument(
-        "--digits_list",
-        nargs="+",
-        type=int,
-        required=True,
-        help="List of digit counts (used only for addition).",
+    "--digits",
+    "--digits_list",
+    dest="digits",
+    type=int,
+    required=True,
+    help="Single digit count (used only for addition).",
     )
     parser.add_argument(
-        "--top_ks",
-        nargs="+",
-        type=int,
-        required=True,
-        help="List of top_k values.",
+    "--top_k",
+    "--top_ks",
+    dest="top_k",
+    type=int,
+    required=True,
+    help="Single top_k value.",
     )
     parser.add_argument(
         "--device",
@@ -462,10 +466,10 @@ def main() -> None:
     base_run_dir = _prepare_run_dir(args.output_dir, args.run_name)
 
     print(f"Models: {args.model_names}")
-    print(f"Tasks: {args.tasks}")
-    print(f"top_ks: {args.top_ks}")
-    print(f"digits_list: {args.digits_list}")
-    print(f"num_examples_list: {args.num_examples_list}")
+    print(f"Task: {args.task}")
+    print(f"top_k: {args.top_k}")
+    print(f"digits: {args.digits}")
+    print(f"num_examples: {args.num_examples}")
 
     dtype_map = {
         "bf16": torch.bfloat16,
@@ -483,22 +487,8 @@ def main() -> None:
             f"reserved={reserved:.2f}GiB"
         )
 
-    total_runs = 0
-    for task in args.tasks:
-        if task == "addition":
-            total_runs += (
-                len(args.model_names)
-                * len(args.top_ks)
-                * len(args.digits_list)
-                * len(args.num_examples_list)
-            )
-        else:
-            total_runs += (
-                len(args.model_names)
-                * len(args.top_ks)
-                * 1
-                * len(args.num_examples_list)
-            )
+    # One run per model (single task/top_k/digits/num_examples)
+    total_runs = len(args.model_names)
 
     run_counter = 0
 
@@ -520,63 +510,63 @@ def main() -> None:
 
         _print_mem("post-load")
 
-        for task in args.tasks:
-            digits_iter = args.digits_list if task == "addition" else [None]
-            for top_k in args.top_ks:
-                for digits in digits_iter:
-                    for num_examples in args.num_examples_list:
-                        run_counter += 1
+        task = args.task
+        digits = args.digits if task == "addition" else None
+        top_k = args.top_k
+        num_examples = args.num_examples
 
-                        combo_name = (
-                            f"{model_name}__{task}"
-                            f"__n{num_examples}"
-                            f"__d{digits if task=='addition' else 'na'}"
-                            f"__k{top_k}"
-                        )
-                        run_dir = base_run_dir / combo_name
+        run_counter += 1
 
-                        print(
-                            f"\n[RUN {run_counter}/{total_runs}] {combo_name}"
-                        )
+        combo_name = (
+            f"{model_name}__{task}"
+            f"__n{num_examples}"
+            f"__d{digits if task=='addition' else 'na'}"
+            f"__k{top_k}"
+        )
+        run_dir = base_run_dir / combo_name
 
-                        try:
-                            _run_single_combination(
-                                model=model,
-                                model_name=model_name,
-                                task=task,
-                                num_examples=num_examples,
-                                digits=digits,
-                                top_k=top_k,
-                                device=args.device,
-                                debug=args.debug,
-                                run_dir=run_dir,
-                                amp=args.amp,
-                                val_fraction=args.val_fraction,
-                            )
-                        except torch.cuda.OutOfMemoryError as oom:
-                            print(
-                                f"[OOM] Skipping {combo_name}: {oom}"
-                            )
-                        except Exception as e:
-                            # Surface full traceback and persist to run directory for debugging
-                            tb = traceback.format_exc()
-                            print(f"[ERROR] {combo_name} failed with exception:\n{tb}")
-                            try:
-                                run_dir.mkdir(parents=True, exist_ok=True)
-                                with (run_dir / "error.txt").open("w") as ef:
-                                    ef.write(tb)
-                            except Exception:
-                                pass
-                            # Re-raise to avoid silent failures
-                            raise
-                        finally:
-                            model.reset_hooks()
-                            model.clear_contexts()
-                            model.zero_grad(set_to_none=True)
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            if args.log_mem:
-                                _print_mem(combo_name)
+        print(
+            f"\n[RUN {run_counter}/{total_runs}] {combo_name}"
+        )
+
+        try:
+            _run_single_combination(
+                model=model,
+                model_name=model_name,
+                task=task,
+                num_examples=num_examples,
+                digits=digits,
+                top_k=top_k,
+                device=args.device,
+                debug=args.debug,
+                run_dir=run_dir,
+                amp=args.amp,
+                val_fraction=args.val_fraction,
+            )
+        except torch.cuda.OutOfMemoryError as oom:
+            print(
+                f"[OOM] Skipping {combo_name}: {oom}"
+            )
+        except Exception as e:
+            # Surface full traceback and persist to run directory for debugging
+            tb = traceback.format_exc()
+            print(f"[ERROR] {combo_name} failed with exception:\n{tb}")
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                with (run_dir / "error.txt").open("w") as ef:
+                    ef.write(tb)
+            except Exception:
+                pass
+            # Re-raise to avoid silent failures
+            raise
+        finally:
+            model.reset_hooks()
+            model.clear_contexts()
+            model.zero_grad(set_to_none=True)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if args.log_mem:
+                _print_mem(combo_name)
 
         del model
         if torch.cuda.is_available():
