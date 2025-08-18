@@ -11,6 +11,7 @@ import seaborn as sns
 import numpy as np
 from scipy import stats
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
+import re
 
 # Method display names (gradient only)
 METHOD_DISPLAY = {
@@ -162,6 +163,18 @@ def plot_all(df: pd.DataFrame, out_dir: Path, show: bool, sort_by: str, *,
     plt.rcParams.update({"font.family": "serif"})
     base_palette = sns.color_palette("colorblind")
 
+    def sanitize_filename(name: str) -> str:
+        """Make a safe filename segment: replace path seps and illegal chars with underscores."""
+        # Replace path separators first
+        name = name.replace("/", "_").replace("\\", "_")
+        # Collapse whitespace to single underscores
+        name = re.sub(r"\s+", "_", name)
+        # Keep alphanumerics, underscore, hyphen, dot; replace others
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        # Collapse multiple underscores
+        name = re.sub(r"_+", "_", name).strip("_")
+        return name
+
     def _create_plot(sub: pd.DataFrame,
                      baseline_col: str,
                      ablation_col: str,
@@ -242,7 +255,7 @@ def plot_all(df: pd.DataFrame, out_dir: Path, show: bool, sort_by: str, *,
 
         ax.grid(axis="y", linestyle="--", alpha=0.7, zorder=0)
         if percent:
-            ax.set_ylim(0, 105)
+            ax.set_ylim(0, 110)
         else:
             max_val = float(np.max([np.max(v) for v in value_arrays if v is not None])) if value_arrays else 1.0
             ax.set_ylim(0, max_val * 1.08 if max_val > 0 else 1)
@@ -287,7 +300,7 @@ def plot_all(df: pd.DataFrame, out_dir: Path, show: bool, sort_by: str, *,
 
     for model_disp in sorted(grouped.model_display.unique()):
         sub = grouped[grouped.model_display == model_disp].copy()
-        safe_model = model_disp.replace(" ", "_")
+        safe_model = sanitize_filename(model_disp)
         pretty_method = METHOD_DISPLAY.get(method, method.title())
 
         # For each model, generate 4 plots: train/train, val/val, train/val, circuit reuse
@@ -305,7 +318,7 @@ def plot_all(df: pd.DataFrame, out_dir: Path, show: bool, sort_by: str, *,
                 control_label="Control"
             )
 
-            # Val/Val if available
+        # Val/Val if available
         if ("baseline_val_accuracy_mean" in sub.columns) and sub["baseline_val_accuracy_mean"].notna().any():
             print(f"[PLOT] {model_disp} Val/Val")
             _create_plot(
@@ -318,21 +331,7 @@ def plot_all(df: pd.DataFrame, out_dir: Path, show: bool, sort_by: str, *,
                 control_label="Control"
             )
 
-            # Train/Val if available (keep error columns intact)
-        if ("baseline_train_accuracy_mean" in sub.columns) and sub["baseline_train_accuracy_mean"].notna().any() and \
-           ("ablation_val_accuracy_mean" in sub.columns) and sub["ablation_val_accuracy_mean"].notna().any():
-            print(f"[PLOT] {model_disp} Train/Val")
-            _create_plot(
-                sub,
-                "baseline_train_accuracy_mean",
-                "ablation_val_accuracy_mean",
-                f"{model_disp} Train/Val",
-                f"{safe_model}_{method}_train_val.png",
-                control_col="control_val_accuracy_mean" if include_control and ("control_val_accuracy_mean" in sub.columns) else None,
-                control_label="Control"
-            )
-
-            # Circuit reuse plot (shared circuit size / top_k). Uses train extraction only; no control.
+        # Circuit reuse plot (shared circuit size / top_k). Uses train extraction only; no control.
         if ("shared_circuit_size_mean" in sub.columns and sub["shared_circuit_size_mean"].notna().any()
             and "top_k_mean" in sub.columns and sub["top_k_mean"].notna().any()):
             reuse_df = sub[["model_display", "task_display", "shared_circuit_size_mean", "top_k_mean"]].copy()
