@@ -183,7 +183,7 @@ class HFHookedOLMo:
 
             def _o_proj_fwd(mod, inputs, out, _li=li, _H=n_heads, _Dh=d_head, _D=d_model):
                 name = f"blocks.{_li}.attn.hook_result"
-                # Fast path: no listeners -> don’t materialize per-head tensor
+                # Fast path: no listeners -> don't materialize per-head tensor
                 if not self._active_fwd.get(name):
                     self._emit_fwd(name, out.unsqueeze(2).expand(-1, -1, _H, -1))
                     return out

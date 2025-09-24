@@ -308,9 +308,9 @@ def plot_accuracy_bars(
 
         title = f"{model_disp} k={int(k_val)}"
         if "method_display" in sub.columns and isinstance(method_disp, str) and method_disp:
-            title += f" — {method_disp}"
+            title += f" - {method_disp}"
         if p is not None:
-            title += f" — p={p}"
+            title += f" - p={p}"
 
         ax.set_title(title)
         ax.grid(axis="y", linestyle="--", alpha=0.6)
@@ -387,10 +387,10 @@ def plot_lift_bars(
 
         title = f"{model_disp} k={int(k_val)}"
         if isinstance(method_disp, str) and method_disp:
-            title += f" — {method_disp}"
-        title += f" — {split.title()}"
+            title += f" - {method_disp}"
+        title += f" - {split.title()}"
         if p is not None:
-            title += f" — p={p}"
+            title += f" - p={p}"
 
         ax.set_title(title)
         ax.grid(axis="y", linestyle="--", alpha=0.6)

@@ -17,8 +17,8 @@ We implement several control methods:
 
 Outputs are saved per run into a folder with:
 
-- `metrics.json` – aggregated metrics by top-K and threshold
-- `attributions_train.jsonl` – per-example ranked components and scores
+- `metrics.json` - aggregated metrics by top-K and threshold
+- `attributions_train.jsonl` - per-example ranked components and scores
 
 ## Quick start
 
@@ -42,11 +42,11 @@ python plot_results2.py --results-dir results
 
 This writes:
 
-- aggregated_by_task_model_k.csv – flat metrics table
-- multiplot_reuse_vs_threshold.png – reuse@p vs p
-- multiplot_lift_vs_threshold.png – knockout diff vs p
-- multiplot_perm_neglog10p_vs_threshold.png – permutation significance (−log10 p) vs p
-- permutation_summary.tex – compact LaTeX table of permutation p-values and observed diffs
+- aggregated_by_task_model_k.csv - flat metrics table
+- multiplot_reuse_vs_threshold.png - reuse@p vs p
+- multiplot_lift_vs_threshold.png - knockout diff vs p
+- multiplot_perm_neglog10p_vs_threshold.png - permutation significance (-log10 p) vs p
+- permutation_summary.tex - compact LaTeX table of permutation p-values and observed diffs
 
 ## Key CLI args
 
