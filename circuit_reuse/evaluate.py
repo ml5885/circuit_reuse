@@ -120,7 +120,6 @@ def evaluate_accuracy(model: Any, dataset: Iterable[Example], task: str, verbose
             else:
                 gold_ids = _extract_gold_ids(model, prompt, target, device=device, verbose=verbose)
                 pred_id = int(logits_last.argmax().item())
-                # Compare only to the first continuation token for deterministic scoring
                 if gold_ids and pred_id == gold_ids[0]:
                     correct += 1
 
@@ -147,7 +146,7 @@ def evaluate_accuracy_with_ablation(
 
     correct, total = 0, 0
     device = model.cfg.device
-    with torch.inference_mode(), model.hooks(hooks):
+    with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
         for ex in dataset:
             logits = model(model.to_tokens(ex.prompt, prepend_bos=True).to(device))
             logits_last = logits[0, -1]
@@ -201,8 +200,7 @@ def evaluate_predictions(
         for comp in removed:
             if comp.kind == "head":
                 def hook_head(act, hook=None, head_index=comp.index):
-                    if act.dim() == 4:
-                        act[:, :, head_index, :] = 0.0
+                    act[:, :, head_index, :] = 0.0
                     return act
                 hooks.append((f"blocks.{comp.layer}.attn.hook_result", hook_head))
             elif comp.kind == "mlp":

@@ -49,7 +49,7 @@ def _parse_int_list(s: str | None) -> List[int]:
         return [int(x) for x in s]
     return [
         int(x.strip())
-        for x in str(s).replace(";", ",").split(",") 
+        for x in str(s).replace(";", ",").split(",")
         if x is not None and str(x).strip() != ""
     ]
 
@@ -114,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force re-extraction of attributions even if cached scores exist.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for dataset generation and train/val shuffle (default: 42).",
+    )
     return parser.parse_args()
 
 
@@ -130,10 +136,7 @@ def _enumerate_all_components(model):
 
 def _permutation_test(shared_flags: List[int], control_flags: List[int], rng: random.Random, trials: int = 5000) -> Dict[str, Any]:
     """Perform a paired permutation test between shared and control correctness flags.
-
-    Returns a dictionary with the observed difference and p-value.  This is
-    identical to the original implementation.
-    """
+    Returns a dictionary with the observed difference and p-value."""
     assert len(shared_flags) == len(control_flags)
     n = len(shared_flags)
     if n == 0:
@@ -290,10 +293,14 @@ def _run_single_combination(
     cache_dir: Path,
     analysis: bool,
     force_extract: bool,
+    seed: int,
 ):
+    # Seed random before dataset generation and shuffle for reproducibility
+    random.seed(seed)
+
     dataset = get_dataset(task, num_examples=num_examples, digits=digits if digits is not None else 0)
     print(f"[{model_name}/{task}] Generated {len(dataset)} examples for method '{method}'.")
-        
+
     # Split into train/val
     examples = list(dataset)
     random.shuffle(examples)
@@ -312,9 +319,12 @@ def _run_single_combination(
     digits_str = str(digits) if (digits is not None and task == "addition") else "na"
     attrib_name = (
         f"{model_name.replace('/', '_')}__{hf_revision or 'none'}__{task}__{method}__"
-        f"n{num_examples}__d{digits_str}.jsonl"
+        f"n{num_examples}__d{digits_str}__s{seed}.jsonl"
     )
     attrib_path = cache_dir / attrib_name
+
+    combo_key_root = f"{model_name}|{hf_revision or 'none'}|{task}|{method}|n{num_examples}|d{digits}"
+    start = end = None
 
     # Decide whether to load from cache or extract anew
     if not force_extract and attrib_path.exists():
@@ -340,7 +350,6 @@ def _run_single_combination(
         else:
             # Perform extraction
             extractor = CircuitExtractor(model, method=method)
-            combo_key_root = f"{model_name}|{hf_revision or 'none'}|{task}|{method}|n{num_examples}|d{digits}"
             start = time.time()
             try:
                 _, example_scores = extractor.extract_circuits_from_examples(
@@ -404,6 +413,8 @@ def _run_single_combination(
         if K <= 0:
             continue
         sets_k = _build_topk_example_sets(example_scores, K)
+        total_components = len(example_scores[0])
+        take_components = max(1, int(total_components * K / 100))
         counts = _count_components(sets_k)
         n_ex = len(sets_k)
 
@@ -414,7 +425,7 @@ def _run_single_combination(
             shared = [c for c, cnt in counts.items() if cnt >= need]
             shared_size = len(shared)
             # Reuse percent is capped at 100
-            reuse_percent = float(min(shared_size, K) / max(1, K) * 100.0)
+            reuse_percent = float(min(shared_size, take_components) / max(1, take_components) * 100.0)
 
             # Evaluate ablations and collect per-example correctness for permutation tests
             rng_seed = int(hashlib.md5(f"{combo_key_root}|K{K}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
@@ -577,6 +588,7 @@ def main():
             cache_dir=Path(args.cache_dir),
             analysis=args.analysis,
             force_extract=args.force_extract,
+            seed=args.seed,
         )
     except Exception as e:
         print(f"[FATAL] {e}")

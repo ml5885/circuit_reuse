@@ -67,15 +67,6 @@ class CircuitExtractor:
         return component_scores
 
     def _prepare_eap_inputs(self, example: Example):
-        """Prepare inputs for the EAP (Edge Attribution Patching) method.
-        
-        EAP requires both clean and corrupted token sequences, as well as
-        a metric function which computes the loss on the target tokens.
-        
-        Target tokens are defined as the tokens in the clean sequence that come 
-        after the prompt, excluding any common prefix with the prompt.
-        """
-        # Tokenize inputs
         prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
         clean_full_tok = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
         corrupted_full_tok = self.model.to_tokens(example.corrupted_prompt + example.corrupted_target, prepend_bos=True)
@@ -83,17 +74,12 @@ class CircuitExtractor:
         device = self.model.cfg.device
         p_ids, f_ids = prompt_tok.tolist()[0], clean_full_tok.tolist()[0]
         lcp = 0
-        # Find the longest common prefix between prompt and full clean tokens
         while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
             lcp += 1
-
-        # Find target token IDs (those after the prompt, excluding common prefix)
         gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
         target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
         prompt_len = prompt_tok.shape[1]
         positions = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), device=device, dtype=torch.long)
-
-        # Add padding to both sequences
         max_len = max(clean_full_tok.shape[1], corrupted_full_tok.shape[1])
         pad_token = self.model.tokenizer.pad_token_id if self.model.tokenizer.pad_token_id is not None else self.model.tokenizer.eos_token_id
 
@@ -104,11 +90,6 @@ class CircuitExtractor:
         return clean_tokens, corrupted_tokens, metric, max_len
 
     def _prepare_gradient_inputs(self, example: Example):
-        """Prepare inputs for gradient-based methods.
-        
-        Gradient methods require only the clean token sequence and a metric function.
-        Target tokens are defined the same as above.
-        """
         prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
         clean_full_tok = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
 
@@ -147,7 +128,6 @@ class CircuitExtractor:
             else:
                 max_seq_len = max(max_seq_len, _len_cp(clean_tok))
 
-        # One big reusable buffer sized to the real max
         work_buf = torch.zeros(
             (1, max_seq_len, self.graph.n_forward, self.model.cfg.d_model),
             device=self.model.cfg.device, dtype=self.model.cfg.dtype,
@@ -156,12 +136,10 @@ class CircuitExtractor:
         # Pass 2: stream examples to GPU one by one
         for idx, ex in enumerate(examples):
             if self.method == "eap":
-                # CPU tokenization
                 prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
                 clean_full = self.model.to_tokens(ex.prompt + ex.target, prepend_bos=True)
                 corrupted_full = self.model.to_tokens(ex.corrupted_prompt + ex.corrupted_target, prepend_bos=True)
 
-                # gold ids and positions (CPU)
                 p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
                 lcp = 0
                 for a, b in zip(p_ids, f_ids):
@@ -171,13 +149,11 @@ class CircuitExtractor:
                 prompt_len = prompt_tok.shape[1]
                 pos_cpu = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), dtype=torch.long)
 
-                # pad per-example on CPU
                 pad_id = self.model.tokenizer.pad_token_id if self.model.tokenizer.pad_token_id is not None else self.model.tokenizer.eos_token_id
                 ex_len = max(clean_full.shape[1], corrupted_full.shape[1])
                 clean_pad = F.pad(clean_full, (0, ex_len - clean_full.shape[1]), "constant", pad_id)
                 corrupt_pad = F.pad(corrupted_full, (0, ex_len - corrupted_full.shape[1]), "constant", pad_id)
 
-                # now move only this example to GPU
                 clean_tokens = clean_pad.to(device)
                 corrupted_tokens = corrupt_pad.to(device)
                 positions = pos_cpu.to(device)
@@ -222,7 +198,6 @@ class CircuitExtractor:
                     self.model.reset_hooks()
                     scores = scores.cpu()
 
-            # convert to components on CPU
             component_scores = self._scores_to_components(scores)
             per_example_scores.append(component_scores)
             items = sorted(component_scores.items(), key=lambda x: x[1], reverse=True)
@@ -232,8 +207,10 @@ class CircuitExtractor:
             if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
                 print(f"[{task_name}] ({self.method}) {idx + 1}/{len(examples)} examples processed (last circuit size={len(comp_set)})")
 
-            # free per-example tensors
-            del clean_tokens, corrupted_tokens, positions, target_ids, scores
+            if self.method == "eap":
+                del clean_tokens, corrupted_tokens, positions, target_ids, scores
+            else:
+                del clean_full, prompt_tok, positions, target_ids, scores
             torch.cuda.empty_cache()
 
         del work_buf

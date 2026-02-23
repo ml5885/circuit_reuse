@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from sympy import li
 import torch
 try:
     torch.backends.cuda.enable_flash_sdp(True)
@@ -147,7 +146,6 @@ class HFHookedOLMo:
             self._emit_fwd("hook_embed", out)
         self._persist_handles.append(emb.register_forward_hook(_embed_fwd))
 
-        # safety checks
         if not hasattr(model, "model") or not hasattr(model.model, "layers"):
             raise RuntimeError("Expected Olmo2Model at .model with .layers ModuleList")
         layers: nn.ModuleList = model.model.layers

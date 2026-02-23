@@ -3,7 +3,7 @@ Plot histograms of attribution score distributions for multiple models and tasks
 
 Example usage:
 
-    python analysis/plot_attribution_histograms.py \
+    python analysis/plot_attribution_scores.py \
         --cache-dir cache \
         --models meta/llama-2-7b-hf,meta/llama-2-13b-hf \
         --tasks addition,boolean,ioi \
@@ -36,7 +36,6 @@ def load_scores(attrib_path: Path) -> List[float]:
         for line in f:
             data = json.loads(line)
             for comp in data.get("components", []):
-                # Score may be positive or negative depending on method; cast to float
                 scores.append(float(comp.get("score", 0.0)))
     return scores
 
@@ -139,7 +138,6 @@ def main() -> None:
                     va="center",
                 )
                 ax.set_title(f"{model}\n{task}")
-            # improve layout
             ax.tick_params(axis="x", labelrotation=45)
     plt.tight_layout()
     out_path = Path(args.output)

@@ -205,8 +205,6 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
         acts = activations.detach()
         if head_index is not None and acts.ndim == 4:
             acts = acts[:, :, head_index, :]
-        
-        # Write into the slice of the pre-allocated tensor
         if add:
             activation_difference[:, :seq_len, index, :] += acts
         else:
@@ -219,8 +217,6 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
             grads = grads.sum(dim=2)
         if grads.ndim == 3:
             grads = grads.unsqueeze(2)
-        
-        # Use the corresponding slice of the activation_difference tensor
         act_diff_slice = activation_difference[:, :seq_len, :prev_index]
         
         s = einsum(
@@ -257,12 +253,7 @@ def attribute_single_example(
     corrupted_tokens: Tensor,
     activation_difference: Tensor,
 ) -> Tensor:
-    """
-    Runs EAP for a single example, reusing a pre-allocated activation_difference tensor.
-    """
     scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=model.cfg.dtype)
-    
-    # IMPORTANT: Reset the reusable tensor before processing the new example
     activation_difference.zero_()
 
     fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(
