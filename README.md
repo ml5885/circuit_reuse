@@ -1,77 +1,55 @@
 # Circuit Reuse Experiments
 
-This code measures per-example circuits and shared reuse across examples, then ablates the shared circuit vs various control methods to assess causal importance.
-
-High-level flow:
-
-1. Generate a dataset of prompt/target pairs for a task.
-2. Attribute component importance (attention heads / MLPs) per example.
-3. For each top-K and reuse threshold p, build a shared circuit from components present in at least p% of example circuits.
-4. Ablate the shared circuit vs control circuits; measure accuracy drop and permutation significance.
-
-We implement several control methods:
-
-- Size-matched random control (default): Random sampling excluding shared components, preserving head/MLP ratios
-- Type-ignoring control (`--ignore-type`): Random sampling from all components regardless of type
-- Parity control: Random sampling including shared components in the pool
-
-Outputs are saved per run into a folder with:
-
-- `metrics.json` - aggregated metrics by top-K and threshold
-- `attributions_train.jsonl` - per-example ranked components and scores
+Measures per-example circuits via Edge Attribution Patching, quantifies how much they overlap across examples (reuse@p), and validates shared circuits causally via zero-ablation against size-matched random controls.
 
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
-python run_experiment.py \
-	--model_name "qwen3-0.6b" \
-	--task "ioi" \
-	--num_examples 50 \
-	--top_k_list "5,10" \
-	--reuse-thresholds "95,99,100" \
-	--perm-trials 2000 \
-	--dtype bf16 --device cpu --debug
+
+# Single-task knockout experiment
+python main_experiment.py \
+  --model_name qwen3-0.6b --task ioi --num_examples 50 \
+  --top_k_list 5,10 --reuse-thresholds 95,99,100 \
+  --perm-trials 2000 --dtype bf16 --device cpu --debug
+
+# Cross-task ablation confusion matrix (requires prior main experiment results)
+python cross_task_experiment.py \
+  --results-dir results/my_run --model_name qwen3-4b \
+  --tasks "boolean,addition,ioi,mcqa" --K 100 --threshold 100 \
+  --output-dir results/cross_task
 ```
-
-Then plot:
-
-```bash
-python plot_results2.py --results-dir results
-```
-
-This writes:
-
-- aggregated_by_task_model_k.csv - flat metrics table
-- multiplot_reuse_vs_threshold.png - reuse@p vs p
-- multiplot_lift_vs_threshold.png - knockout diff vs p
-- multiplot_perm_neglog10p_vs_threshold.png - permutation significance (-log10 p) vs p
-- permutation_summary.tex - compact LaTeX table of permutation p-values and observed diffs
 
 ## Key CLI args
 
-- --top_k_list: Comma-separated per-example top-K values (e.g., "5,10,25,50").
-- --reuse-thresholds: Comma-separated thresholds p as percentages (e.g., "95,96,97,98,99,100").
-- --perm-trials: Trials for paired permutation tests between shared vs control ablations.
-- --ignore-type: Use type-ignoring control (sample randomly regardless of head/MLP type).
+- `--top_k_list`: Per-example top-K values as percentages (e.g., `50,75,100`).
+- `--reuse-thresholds`: Thresholds p as percentages (e.g., `95,99,100`).
+- `--perm-trials`: Trials for paired permutation test (shared vs control).
+- `--ignore-type`: Sample control randomly regardless of head/MLP type.
+- `--analysis`: Skip extraction, load cached attributions only.
 
-## Plotting utilities
+## Analysis scripts
 
-- `plot_results.py`: Basic accuracy and lift bar charts by task and model
-- `plot_results2.py`: Multi-panel plots showing reuse metrics and lift across thresholds
-- `plot_results3.py`: LaTeX tables of Ablation Impact Ratio over pretraining steps
-- `plot_results4.py`: Permutation test p-value visualizations
+All in `analysis/`:
 
-## Notes
+- `plot_accuracy_and_lift_bars.py` -- per-model accuracy and lift bar charts
+- `plot_k_sweep.py` -- lift and reuse vs top-K line plots
+- `plot_attribution_scores.py` -- attribution score distribution histograms
+- `multiplot_lift_and_reuse.py` -- multi-panel lift and reuse bar charts
+- `multiplot_pvalues.py` -- permutation p-value visualizations
+- `generate_air_tables.py` -- LaTeX AIR tables (pretraining sweep)
 
-- Attribution methods supported: eap, gradient.
-- Results folders under results/, results_pretraining/ have plots and CSVs for analysis.
+## Caching
+
+Attribution scores are cached as JSONL in `cache/` (configurable via `--cache-dir`). Filename encodes model, revision, task, method, N, digits, and seed. Use `--force-extract` to recompute.
+
+## Output
+
+Each run saves `metrics.json` with baseline accuracies, per-(K, p) shared circuit components, ablation/control accuracies, knockout_diff (AIR), and permutation test results on train/val splits.
+
+Cross-task experiment saves a confusion matrix CSV and structured JSON with raw and baseline-normalized accuracy drops.
 
 ## References
 
-- TransformerLens: https://github.com/TransformerLensOrg/TransformerLens
-- eap-ig: https://github.com/hannamw/eap-ig
-
-## License
-
-MIT
+- [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens)
+- [eap-ig](https://github.com/hannamw/eap-ig)

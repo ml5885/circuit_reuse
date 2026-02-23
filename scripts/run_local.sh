@@ -28,7 +28,7 @@ for MODEL_NAME in "${MODELS[@]}"; do
 
                 echo "[RUNNING] Model: $MODEL_NAME, Task: $TASK, Method: $METHOD, TopKs: $TOP_K_LIST_STR, Reuse: $REUSE_THRESHOLDS, Digits: $DIGITS, Examples: $NUM_EXAMPLES"
 
-                python run_experiment.py \
+                python main_experiment.py \
                     --model_name "$MODEL_NAME" \
                     --task "$TASK" \
                     --top_k_list "$TOP_K_LIST_STR" \
