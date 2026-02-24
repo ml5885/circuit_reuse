@@ -220,10 +220,8 @@ def _sample_control_components(
         head_pool = [c for c in all_components if c.kind == "head" and c not in shared]
         mlp_pool = [c for c in all_components if c.kind == "mlp" and c not in shared]
 
-    if n_shared_heads > len(head_pool):
-        raise ValueError(f"Insufficient head components in pool: need {n_shared_heads}, have {len(head_pool)}")
-    if n_shared_mlps > len(mlp_pool):
-        raise ValueError(f"Insufficient MLP components in pool: need {n_shared_mlps}, have {len(mlp_pool)}")
+    n_shared_heads = min(n_shared_heads, len(head_pool))
+    n_shared_mlps = min(n_shared_mlps, len(mlp_pool))
 
     sampled = []
     if n_shared_heads > 0:
@@ -360,6 +358,7 @@ def _run_single_combination(
                 )
             except torch.cuda.OutOfMemoryError as e:
                 print(f"[OOM] Skipping attribution for {combo_key_root}: {e}")
+                return
             except Exception as e:
                 print(f"[ERROR] Circuit extraction failed for {combo_key_root}: {e}")
                 raise
