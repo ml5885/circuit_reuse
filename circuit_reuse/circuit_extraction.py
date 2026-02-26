@@ -115,25 +115,25 @@ class CircuitExtractor:
         circuits: List[Set[Component]] = []
         per_example_scores: List[Dict[Component, float]] = []
 
-        # Pass 1: CPU-only length scan to size the reusable buffer
-        def _len_cp(t: torch.Tensor) -> int: return int(t.shape[1])
-        max_seq_len = 0
-        for ex in examples:
-            # to_tokens returns CPU tensors here; do NOT .to(device) yet
-            prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
-            clean_tok = self.model.to_tokens(ex.prompt + ex.target, prepend_bos=True)
-            if self.method == "eap":
-                corrupt_tok = self.model.to_tokens(ex.corrupted_prompt + ex.corrupted_target, prepend_bos=True)
-                max_seq_len = max(max_seq_len, _len_cp(clean_tok), _len_cp(corrupt_tok))
-            else:
-                max_seq_len = max(max_seq_len, _len_cp(clean_tok))
+        # Lazily-allocated work buffer — sized to current example, re-allocated
+        # only when a longer example is seen.  This avoids a single outlier
+        # sequence forcing an allocation that OOMs on memory-constrained GPUs.
+        work_buf: torch.Tensor | None = None
+        work_buf_seq_len = 0
 
-        work_buf = torch.zeros(
-            (1, max_seq_len, self.graph.n_forward, self.model.cfg.d_model),
-            device=self.model.cfg.device, dtype=self.model.cfg.dtype,
-        )
+        def _get_work_buf(seq_len: int) -> torch.Tensor:
+            nonlocal work_buf, work_buf_seq_len
+            if work_buf is None or seq_len > work_buf_seq_len:
+                del work_buf
+                torch.cuda.empty_cache()
+                work_buf = torch.zeros(
+                    (1, seq_len, self.graph.n_forward, self.model.cfg.d_model),
+                    device=self.model.cfg.device, dtype=self.model.cfg.dtype,
+                )
+                work_buf_seq_len = seq_len
+            return work_buf
 
-        # Pass 2: stream examples to GPU one by one
+        # Stream examples to GPU one by one
         for idx, ex in enumerate(examples):
             if self.method == "eap":
                 prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
@@ -164,7 +164,7 @@ class CircuitExtractor:
                     scores = attribute_single_example(
                         model=self.model, graph=self.graph, metric=metric,
                         clean_tokens=clean_tokens, corrupted_tokens=corrupted_tokens,
-                        activation_difference=work_buf,
+                        activation_difference=_get_work_buf(ex_len),
                     )
 
             else:  # gradient method
@@ -185,11 +185,11 @@ class CircuitExtractor:
                 seq_len = int(clean_full.shape[1])
                 scores = torch.zeros((self.graph.n_forward, self.graph.n_backward),
                                     device=self.model.cfg.device, dtype=self.model.cfg.dtype)
-                work_buf.zero_()
+                buf = _get_work_buf(seq_len)
+                buf.zero_()
 
                 with autocast_ctx:
-                    # Build hooks for this example
-                    _, fwd_hooks_clean, bwd_hooks = make_hooks(self.model, self.graph, work_buf, scores)
+                    _, fwd_hooks_clean, bwd_hooks = make_hooks(self.model, self.graph, buf, scores)
                     metric = self._get_metric_fn(positions=positions.to(device), target_ids=target_ids.to(device))
                     with self.model.hooks(fwd_hooks=fwd_hooks_clean, bwd_hooks=bwd_hooks):
                         logits = self.model(clean_full.to(device))
