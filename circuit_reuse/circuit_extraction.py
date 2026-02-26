@@ -134,7 +134,9 @@ class CircuitExtractor:
             return work_buf
 
         # Stream examples to GPU one by one
+        n_skipped = 0
         for idx, ex in enumerate(examples):
+          try:
             if self.method == "eap":
                 prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
                 clean_full = self.model.to_tokens(ex.prompt + ex.target, prepend_bos=True)
@@ -198,20 +200,35 @@ class CircuitExtractor:
                     self.model.reset_hooks()
                     scores = scores.cpu()
 
-            component_scores = self._scores_to_components(scores)
-            per_example_scores.append(component_scores)
-            items = sorted(component_scores.items(), key=lambda x: x[1], reverse=True)
-            comp_set = {c for c, _ in items}
-            circuits.append(comp_set)
-
-            if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
-                print(f"[{task_name}] ({self.method}) {idx + 1}/{len(examples)} examples processed (last circuit size={len(comp_set)})")
-
-            if self.method == "eap":
-                del clean_tokens, corrupted_tokens, positions, target_ids, scores
-            else:
-                del clean_full, prompt_tok, positions, target_ids, scores
+          except torch.cuda.OutOfMemoryError:
+            n_skipped += 1
+            self.model.zero_grad(set_to_none=True)
+            self.model.reset_hooks()
+            # Shrink the work_buf back so the failed size doesn't persist
+            work_buf = None
+            work_buf_seq_len = 0
+            gc.collect()
             torch.cuda.empty_cache()
+            print(f"[OOM] Skipping example {idx} (seq_len too large for available VRAM)")
+            continue
+
+          component_scores = self._scores_to_components(scores)
+          per_example_scores.append(component_scores)
+          items = sorted(component_scores.items(), key=lambda x: x[1], reverse=True)
+          comp_set = {c for c, _ in items}
+          circuits.append(comp_set)
+
+          if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
+              print(f"[{task_name}] ({self.method}) {idx + 1}/{len(examples)} examples processed (last circuit size={len(comp_set)})")
+
+          if self.method == "eap":
+              del clean_tokens, corrupted_tokens, positions, target_ids, scores
+          else:
+              del clean_full, prompt_tok, positions, target_ids, scores
+          torch.cuda.empty_cache()
+
+        if n_skipped:
+            print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
 
         del work_buf
         gc.collect()
