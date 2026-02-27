@@ -2,10 +2,18 @@
 
 Measures per-example circuits via Edge Attribution Patching, quantifies how much they overlap across examples (reuse@p), and validates shared circuits causally via zero-ablation against size-matched random controls.
 
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+```
+
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
 
 # Single-task knockout experiment
 python main_experiment.py \
@@ -38,6 +46,7 @@ All in `analysis/`:
 - `multiplot_lift_and_reuse.py` -- multi-panel lift and reuse bar charts
 - `multiplot_pvalues.py` -- permutation p-value visualizations
 - `generate_air_tables.py` -- LaTeX AIR tables (pretraining sweep)
+- `cross_task_tables.py` -- cross-task ablation confusion matrices and heatmaps
 
 ## Caching
 

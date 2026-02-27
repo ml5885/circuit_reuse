@@ -120,6 +120,13 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for dataset generation and train/val shuffle (default: 42).",
     )
+    parser.add_argument(
+        "--results-home",
+        type=str,
+        default=None,
+        help="Login-accessible directory for small outputs (metrics.json). "
+             "Mirrors the run_dir structure. If unset, metrics are only saved under --output-dir.",
+    )
     return parser.parse_args()
 
 
@@ -292,6 +299,7 @@ def _run_single_combination(
     analysis: bool,
     force_extract: bool,
     seed: int,
+    results_home: Path | None = None,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -526,6 +534,14 @@ def _run_single_combination(
     with (combo_dir / "metrics.json").open("w") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
     print(f"[METRICS] {combo_dir/'metrics.json'}")
+
+    if results_home is not None:
+        # Mirror metrics.json to a login-accessible path
+        results_home.mkdir(parents=True, exist_ok=True)
+        with (results_home / "metrics.json").open("w") as f:
+            json.dump(metrics, f, indent=2, sort_keys=True)
+        print(f"[METRICS-HOME] {results_home/'metrics.json'}")
+
     print(f"[DONE] {combo_dir}")
 
 
@@ -565,6 +581,7 @@ def main():
             f"n{args.num_examples}__d{digits if args.task=='addition' else 'na'}__Ks{','.join(map(str, top_k_list))}__reuse{','.join(map(str, reuse_thresholds))}"
         )
         run_dir = base_run_dir / combo_name
+        results_home_dir = (Path(args.results_home) / base_run_dir.name / combo_name) if args.results_home else None
         print(f"\n[RUN] {combo_name}")
 
         _run_single_combination(
@@ -588,6 +605,7 @@ def main():
             analysis=args.analysis,
             force_extract=args.force_extract,
             seed=args.seed,
+            results_home=results_home_dir,
         )
     except Exception as e:
         print(f"[FATAL] {e}")
