@@ -8,14 +8,14 @@ from contextlib import nullcontext
 import gc
 from collections import defaultdict
 
-from .graph import Graph, attribute_single_example, make_hooks
+from .graph import Graph, Granularity, attribute_single_example, make_hooks
 from .dataset import Example
 
 
 @dataclass(frozen=True)
 class Component:
     layer: int
-    kind: str  # "head" or "mlp"
+    kind: str  # "head", "mlp", "attn_block", or "neuron"
     index: int
 
     def __hash__(self) -> int:
@@ -29,10 +29,11 @@ class CircuitExtractor:
     """
     Extract per-example attribution scores for components.
     """
-    def __init__(self, model: HookedTransformer, method: str = "eap") -> None:
+    def __init__(self, model: HookedTransformer, method: str = "eap", granularity: Granularity = "head_mlp") -> None:
         self.model = model
         self.method = method
-        self.graph = Graph.from_model(model)
+        self.granularity = granularity
+        self.graph = Graph.from_model(model, granularity=granularity)
         # Enable hooks needed for all methods
         self.model.cfg.use_split_qkv_input = True
         self.model.cfg.use_attn_result = True
@@ -46,8 +47,8 @@ class CircuitExtractor:
         return metric
 
     def _scores_to_components(self, scores: torch.Tensor) -> Dict[Component, float]:
-        """Convert raw scores to a mapping from Component to score. """
-        from .graph import InputNode, MLPNode, AttentionNode
+        """Convert raw scores to a mapping from Component to score."""
+        from .graph import InputNode, MLPNode, AttentionNode, AttentionBlockNode
         component_scores: Dict[Component, float] = {}
         per_component_scores = scores.abs().sum(dim=1)
 
@@ -56,14 +57,15 @@ class CircuitExtractor:
             if node is None or isinstance(node, InputNode):
                 continue
 
-            comp = None
-            if hasattr(node, "layer"):
-                if node.__class__.__name__ == "MLPNode":
-                    comp = Component(layer=node.layer, kind="mlp", index=0)
-                elif node.__class__.__name__ == "AttentionNode":
-                    comp = Component(layer=node.layer, kind="head", index=node.head)
-            if comp:
-                component_scores[comp] = float(score)
+            if isinstance(node, AttentionBlockNode):
+                comp = Component(layer=node.layer, kind="attn_block", index=0)
+            elif isinstance(node, AttentionNode):
+                comp = Component(layer=node.layer, kind="head", index=node.head)
+            elif isinstance(node, MLPNode):
+                comp = Component(layer=node.layer, kind="mlp", index=0)
+            else:
+                continue
+            component_scores[comp] = float(score)
         return component_scores
 
     def _prepare_eap_inputs(self, example: Example):

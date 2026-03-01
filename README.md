@@ -48,6 +48,24 @@ All in `analysis/`:
 - `generate_air_tables.py` -- LaTeX AIR tables (pretraining sweep)
 - `cross_task_tables.py` -- cross-task ablation confusion matrices and heatmaps
 
+## Node granularity
+
+The `CircuitExtractor` supports configurable node granularity via the `granularity` parameter:
+
+| Granularity | Nodes | Description |
+|---|---|---|
+| `"head_mlp"` (default) | Attention heads + MLP blocks | Standard per-head, per-MLP-layer circuit analysis |
+| `"block"` | Attention blocks + MLP blocks | Merges all heads in a layer into a single attention block node. Faster and lower memory, but loses head-level resolution |
+| `"neuron"` | Same graph as `head_mlp` | Same computation; reserved for future per-neuron score decomposition |
+
+```python
+from circuit_reuse.circuit_extraction import CircuitExtractor
+
+extractor = CircuitExtractor(model, method="eap", granularity="block")
+```
+
+**Impact on computation**: `"block"` reduces `n_forward` from `1 + n_layers*(n_heads+1)` to `1 + 2*n_layers`, proportionally shrinking the activation difference buffer and score matrix. For GPT-2 small this is 157 → 25.
+
 ## Caching
 
 Attribution scores are cached as JSONL in `cache/` (configurable via `--cache-dir`). Filename encodes model, revision, task, method, N, digits, and seed. Use `--force-extract` to recompute.

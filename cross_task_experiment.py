@@ -20,7 +20,7 @@ def parse_component_str(s):
     """Parse a string representation of a component into a Component object.
 
     The expected format is either ``"head[layer=3, index=2]"`` or
-    ``"mlp[layer=4, index=0]"``.  Whitespace around commas is ignored.
+    ``"mlp[layer=4, index=0]"``. Whitespace around commas is ignored.
     """
     kind, rest = s.split("[", 1)
     rest = rest.rstrip("]")
@@ -41,7 +41,7 @@ def parse_component_str(s):
 
 
 def find_metrics_file(results_dir, model_name, hf_revision, task):
-    """Search ``results_dir`` recursively for a metrics file matching the given settings.
+    """Search results_dir recursively for a metrics file matching the given settings.
 
     Returns the path to the first matching metrics.json file.  Raises an
     exception if no match is found.

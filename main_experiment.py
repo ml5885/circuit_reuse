@@ -121,6 +121,13 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for dataset generation and train/val shuffle (default: 42).",
     )
     parser.add_argument(
+        "--granularity",
+        type=str,
+        default="head_mlp",
+        choices=["head_mlp", "neuron", "block"],
+        help="Node granularity for circuit extraction (default: head_mlp).",
+    )
+    parser.add_argument(
         "--results-home",
         type=str,
         default=None,
@@ -130,13 +137,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _enumerate_all_components(model):
+def _enumerate_all_components(model, granularity="head_mlp"):
     n_layers = model.cfg.n_layers
     n_heads = model.cfg.n_heads
     comps = []
     for layer in range(n_layers):
-        for h in range(n_heads):
-            comps.append(Component(layer=layer, kind="head", index=h))
+        if granularity == "block":
+            comps.append(Component(layer=layer, kind="attn_block", index=0))
+        else:
+            for h in range(n_heads):
+                comps.append(Component(layer=layer, kind="head", index=h))
         comps.append(Component(layer=layer, kind="mlp", index=0))
     return comps
 
@@ -355,7 +365,7 @@ def _run_single_combination(
                 print(f"[CACHE] Loaded cached attributions from {attrib_path}")
         else:
             # Perform extraction
-            extractor = CircuitExtractor(model, method=method)
+            extractor = CircuitExtractor(model, method=method, granularity=args.granularity)
             start = time.time()
             try:
                 _, example_scores = extractor.extract_circuits_from_examples(
@@ -413,7 +423,7 @@ def _run_single_combination(
         "by_k": {},
     }
 
-    all_components = _enumerate_all_components(model)
+    all_components = _enumerate_all_components(model, granularity=args.granularity)
 
     # Loop over K and thresholds
     for K in metrics["top_k_list"]:
