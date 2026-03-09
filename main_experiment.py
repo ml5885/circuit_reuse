@@ -310,6 +310,7 @@ def _run_single_combination(
     force_extract: bool,
     seed: int,
     results_home: Path | None = None,
+    granularity: str = "head_mlp",
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -365,7 +366,7 @@ def _run_single_combination(
                 print(f"[CACHE] Loaded cached attributions from {attrib_path}")
         else:
             # Perform extraction
-            extractor = CircuitExtractor(model, method=method, granularity=args.granularity)
+            extractor = CircuitExtractor(model, method=method, granularity=granularity)
             start = time.time()
             try:
                 _, example_scores = extractor.extract_circuits_from_examples(
@@ -423,7 +424,7 @@ def _run_single_combination(
         "by_k": {},
     }
 
-    all_components = _enumerate_all_components(model, granularity=args.granularity)
+    all_components = _enumerate_all_components(model, granularity=granularity)
 
     # Loop over K and thresholds
     for K in metrics["top_k_list"]:
@@ -616,6 +617,7 @@ def main():
             force_extract=args.force_extract,
             seed=args.seed,
             results_home=results_home_dir,
+            granularity=args.granularity,
         )
     except Exception as e:
         print(f"[FATAL] {e}")
