@@ -258,30 +258,39 @@ def main():
             model_label = MODEL_DISPLAY.get(model, model)
             all_sizes[model_label] = {t: len(circuits[t]) for t in tasks if t in circuits}
 
-            # Per-model CSVs
+            # Per-model plots and CSVs
             model_slug = model.replace("/", "_")
             for metric_name, df in metrics.items():
-                csv_path = args.output_dir / f"{metric_name}_{model_slug}_K{K}_t{args.threshold}.csv"
-                df.to_csv(csv_path)
+                csv_dir = args.output_dir / "csv" / metric_name
+                csv_dir.mkdir(parents=True, exist_ok=True)
+                df.to_csv(csv_dir / f"{model_slug}_K{K}_t{args.threshold}.csv")
 
-                plot_path = args.output_dir / f"{metric_name}_{model_slug}_K{K}_t{args.threshold}.png"
+                plot_dir = args.output_dir / "per_model" / metric_name
+                plot_dir.mkdir(parents=True, exist_ok=True)
                 vmax = 1.0 if metric_name != "intersection_size" else df.values[~np.isnan(df.values)].max()
                 fmt = ".2f" if metric_name != "intersection_size" else ".0f"
                 plot_heatmap(df, f"{metric_name} — {MODEL_DISPLAY.get(model, model)} (K={K})",
-                             plot_path, fmt=fmt, vmax=vmax)
+                             plot_dir / f"{model_slug}_K{K}_t{args.threshold}.png",
+                             fmt=fmt, vmax=vmax)
 
         # Multi-model grid plots
         if all_metrics:
+            multimodel_dir = args.output_dir / "multimodel"
+            multimodel_dir.mkdir(parents=True, exist_ok=True)
             for metric_name in ["jaccard", "overlap_coefficient", "containment"]:
                 model_dfs = {m: all_metrics[m][metric_name] for m in all_metrics}
-                out = args.output_dir / f"multimodel_{metric_name}_K{K}_t{args.threshold}.png"
-                plot_multimodel_heatmap(model_dfs, metric_name, out)
+                plot_multimodel_heatmap(model_dfs, metric_name,
+                                        multimodel_dir / f"{metric_name}_K{K}_t{args.threshold}.png")
 
             # Circuit sizes bar chart
             if all_sizes:
-                plot_circuit_sizes(all_sizes, args.output_dir / f"circuit_sizes_K{K}_t{args.threshold}.png")
+                sizes_dir = args.output_dir / "circuit_sizes"
+                sizes_dir.mkdir(parents=True, exist_ok=True)
+                plot_circuit_sizes(all_sizes, sizes_dir / f"circuit_sizes_K{K}_t{args.threshold}.png")
 
-        # Summary CSV: one row per (model, task_a, task_b) with all metrics
+        # Summary CSV
+        csv_summary_dir = args.output_dir / "csv"
+        csv_summary_dir.mkdir(parents=True, exist_ok=True)
         rows = []
         for model in all_metrics:
             for metric_name, df in all_metrics[model].items():
@@ -298,9 +307,8 @@ def main():
                         })
         if rows:
             summary = pd.DataFrame(rows)
-            summary.to_csv(args.output_dir / f"circuit_overlap_summary_K{K}_t{args.threshold}.csv",
-                           index=False)
-            print(f"\n  Summary saved to circuit_overlap_summary_K{K}_t{args.threshold}.csv")
+            summary.to_csv(csv_summary_dir / f"summary_K{K}_t{args.threshold}.csv", index=False)
+            print(f"\n  Summary saved to csv/summary_K{K}_t{args.threshold}.csv")
 
     print("\nDone!")
 
