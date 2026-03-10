@@ -706,6 +706,12 @@ def parse_args():
         choices=["accuracy_drop_pp", "relative_drop_pct", "ablated_accuracy_pct"],
         help="Which matrix to display in heatmaps.",
     )
+    p.add_argument(
+        "--exclude-tasks",
+        type=str,
+        default="mmlu",
+        help="Comma-separated task names to exclude (default: mmlu). Use 'none' to include all.",
+    )
     return p.parse_args()
 
 
@@ -731,7 +737,11 @@ def main():
         print(f"No cross_task_*.json files found in {results_dir}")
         return
 
-    data = exclude_tasks(data, excluded_task_names={"mmlu"})
+    if args.exclude_tasks.lower() == "none":
+        excluded = set()
+    else:
+        excluded = {t.strip() for t in args.exclude_tasks.split(",")}
+    data = exclude_tasks(data, excluded_task_names=excluded)
 
     metric = args.metric
     metric_labels = {
