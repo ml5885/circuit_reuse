@@ -155,8 +155,20 @@ def plot_multimodel_heatmap(all_dfs: dict[str, pd.DataFrame], metric_name: str,
     plt.close(fig)
 
 
-def plot_circuit_sizes(all_sizes: dict[str, dict[str, int]], out_path: Path):
-    """Bar chart of circuit sizes per model and task."""
+MODEL_TOTAL_COMPONENTS = {
+    "google/gemma-2-2b": 26 * (8 + 1),       # 234
+    "google/gemma-2-2b-it": 26 * (8 + 1),    # 234
+    "meta-llama/Llama-3.2-3B": 28 * (24 + 1),  # 700
+    "meta-llama/Llama-3.2-3B-Instruct": 28 * (24 + 1),  # 700
+    "qwen3-4b": 36 * (32 + 1),               # 1188
+    "qwen3-8b": 36 * (32 + 1),               # 1188  (8B uses same arch, more params per head)
+}
+
+
+def plot_circuit_sizes(all_sizes: dict[str, dict[str, int]], out_path: Path,
+                       pct_path: Path | None = None,
+                       total_components: dict[str, int] | None = None):
+    """Bar chart of circuit sizes per model and task (absolute and relative)."""
     df = pd.DataFrame(all_sizes).T
     df.columns = [TASK_DISPLAY.get(c, c) for c in df.columns]
     ax = df.plot.bar(figsize=(10, 5), rot=30)
@@ -166,6 +178,22 @@ def plot_circuit_sizes(all_sizes: dict[str, dict[str, int]], out_path: Path):
     plt.tight_layout()
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close()
+
+    # Relative version (% of total components)
+    if total_components and pct_path:
+        df_pct = pd.DataFrame(all_sizes).T.astype(float)
+        df_pct.columns = [TASK_DISPLAY.get(c, c) for c in df_pct.columns]
+        for model_label, total in total_components.items():
+            if model_label in df_pct.index and total > 0:
+                df_pct.loc[model_label] = df_pct.loc[model_label] / total * 100
+        ax = df_pct.plot.bar(figsize=(10, 5), rot=30)
+        ax.set_ylabel("% of total components")
+        ax.set_ylim(0, 100)
+        ax.set_title("Shared circuit sizes (% of model components)")
+        ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+        plt.tight_layout()
+        plt.savefig(pct_path, dpi=200, bbox_inches="tight")
+        plt.close()
 
 
 def discover_models(results_dir: Path) -> list[str]:
@@ -284,9 +312,17 @@ def main():
 
             # Circuit sizes bar chart
             if all_sizes:
-                sizes_dir = args.output_dir / "circuit_sizes"
-                sizes_dir.mkdir(parents=True, exist_ok=True)
-                plot_circuit_sizes(all_sizes, sizes_dir / f"circuit_sizes_K{K}_t{args.threshold}.png")
+                abs_dir = args.output_dir / "circuit_sizes" / "absolute"
+                pct_dir = args.output_dir / "circuit_sizes" / "percent"
+                abs_dir.mkdir(parents=True, exist_ok=True)
+                pct_dir.mkdir(parents=True, exist_ok=True)
+                totals = {MODEL_DISPLAY.get(m, m): MODEL_TOTAL_COMPONENTS.get(m, 0) for m in models}
+                plot_circuit_sizes(
+                    all_sizes,
+                    abs_dir / f"circuit_sizes_K{K}_t{args.threshold}.png",
+                    pct_path=pct_dir / f"circuit_sizes_pct_K{K}_t{args.threshold}.png",
+                    total_components=totals,
+                )
 
         # Summary CSV
         csv_summary_dir = args.output_dir / "csv"
