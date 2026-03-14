@@ -171,7 +171,8 @@ def _subplot_grid(n: int) -> Tuple[int, int]:
     return rows, cols
 
 
-def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: bool, show: bool):
+def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: bool, show: bool,
+                     plot_reuse: bool = True):
     df_k = df_k[~df_k["task"].isin(SKIP_TASKS)]
     k_val = int(df_k["top_k"].iloc[0])
 
@@ -275,7 +276,7 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
             _plot_bars(
                 ax,
                 metric_map,
-                ylabel=f"Lift at Top-{k_val} Components",
+                ylabel=f"Lift at Top-{k_val}% Components",
                 ylim=(-1.0, 0.5),
                 show_ylabel=(idx % cols == 0),
                 show_xlabel=(idx // cols == rows - 1),
@@ -306,51 +307,56 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
             plt.show()
         plt.close(fig)
 
-        sub_m["reuse_metric"] = compute_reuse(sub_m, percent=percent)
-        fig, axes = plt.subplots(rows, cols, **shared_plot_params)
-        fig.subplots_adjust(wspace=0.1, hspace=0.3)
+        if plot_reuse:
+            sub_m["reuse_metric"] = compute_reuse(sub_m, percent=percent)
+            fig, axes = plt.subplots(rows, cols, **shared_plot_params)
+            fig.subplots_adjust(wspace=0.1, hspace=0.3)
 
-        for idx, task in enumerate(tasks):
-            ax = axes[idx // cols][idx % cols]
-            dd = sub_m[sub_m["task_display"] == task]
-            if task == "Colored Objects MCQA":
-                task = "CopyColors MCQA"
-            metric_map: Dict[Tuple[str, int], float] = {}
-            for _, row in dd.iterrows():
-                metric_map[(row["model_display"], int(row["reuse_threshold"]))] = row["reuse_metric"]
+            for idx, task in enumerate(tasks):
+                ax = axes[idx // cols][idx % cols]
+                dd = sub_m[sub_m["task_display"] == task]
+                if task == "Colored Objects MCQA":
+                    task = "CopyColors MCQA"
+                metric_map: Dict[Tuple[str, int], float] = {}
+                for _, row in dd.iterrows():
+                    metric_map[(row["model_display"], int(row["reuse_threshold"]))] = row["reuse_metric"]
 
-            _plot_bars(
-                ax,
-                metric_map,
-                ylabel=f"% of Top-{k_val} Components Reused" if percent else f"Fraction of Top-{k_val} Components Reused",
-                ylim=(0, 100 if percent else 1),
-                show_ylabel=(idx % cols == 0),
-                show_xlabel=(idx // cols == rows - 1),
+                _plot_bars(
+                    ax,
+                    metric_map,
+                    ylabel=(
+                        f"% of Top-{k_val}% Components\nReused"
+                        if percent
+                        else f"Fraction of Top-{k_val}% Components\nReused"
+                    ),
+                    ylim=(0, 100 if percent else 1),
+                    show_ylabel=(idx % cols == 0),
+                    show_xlabel=(idx // cols == rows - 1),
+                )
+                ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
+
+            for k in range(len(tasks), rows * cols):
+                fig.delaxes(axes[k // cols][k % cols])
+
+            handles = [Patch(facecolor=colors[p], edgecolor="black", label=str(p)) for p in ps_sorted]
+            fig.legend(
+                handles=handles,
+                title="reuse@p",
+                loc="lower center",
+                bbox_to_anchor=bbox_to_anchor,
+                fontsize=FONT_SIZES["tick"],
+                title_fontsize=FONT_SIZES["legend_title"],
+                ncol=len(ps_sorted)
             )
-            ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
 
-        for k in range(len(tasks), rows * cols):
-            fig.delaxes(axes[k // cols][k % cols])
+            outp = out_dir / f"multiplot_reuse_k{k_val}_{safe_filename(method.lower())}.png"
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(outp, dpi=200, bbox_inches="tight")
+            print(f"[INFO] Saved plot to {outp}")
 
-        handles = [Patch(facecolor=colors[p], edgecolor="black", label=str(p)) for p in ps_sorted]
-        fig.legend(
-            handles=handles, 
-            title="reuse@p",
-            loc="lower center",
-            bbox_to_anchor=bbox_to_anchor,
-            fontsize=FONT_SIZES["tick"],
-            title_fontsize=FONT_SIZES["legend_title"],
-            ncol=len(ps_sorted)
-        )
-
-        outp = out_dir / f"multiplot_reuse_k{k_val}_{safe_filename(method.lower())}.png"
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(outp, dpi=200, bbox_inches="tight")
-        print(f"[INFO] Saved plot to {outp}")
-
-        if show:
-            plt.show()
-        plt.close(fig)
+            if show:
+                plt.show()
+            plt.close(fig)
 
 
 def main():
@@ -374,6 +380,20 @@ def main():
     out_dir = Path(args.output_dir) if args.output_dir else results_dir / f"plots_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Reuse plots (split-independent) go in their own folder
+    out_dir_reuse = out_dir / "reuse"
+    out_dir_reuse.mkdir(parents=True, exist_ok=True)
+    for k_val, df_k in df.groupby("top_k"):
+        if df_k.empty:
+            continue
+        df_k_sorted = df_k.sort_values(["task_display", "hf_revision_step", "method_display", "reuse_threshold"])
+        _multiplot_for_k(
+            df_k_sorted, out_dir_reuse,
+            split="train", percent=args.percent, show=args.show,
+            plot_reuse=True,
+        )
+
+    # Lift plots (split-dependent) go in train/val folders
     for split in ["train", "val"]:
         out_dir_split = out_dir / split
         out_dir_split.mkdir(parents=True, exist_ok=True)
@@ -381,25 +401,12 @@ def main():
         for k_val, df_k in df.groupby("top_k"):
             if df_k.empty:
                 continue
-            
-            df_k = df_k.sort_values(
-                by=["hf_revision_step", "model_display"],
-                key=lambda x: [
-                    (
-                        val if pd.notna(val) else float('inf')
-                    ) if i == 0 else (
-                        val
-                    )
-                    for i, val in enumerate(x.values)
-                ]
-            )
-            
+
+            df_k_sorted = df_k.sort_values(["task_display", "hf_revision_step", "method_display", "reuse_threshold"])
             _multiplot_for_k(
-                df_k.sort_values(["task_display", "hf_revision_step", "method_display", "reuse_threshold"]),
-                out_dir_split,
-                split=split,
-                percent=args.percent,
-                show=args.show
+                df_k_sorted, out_dir_split,
+                split=split, percent=args.percent, show=args.show,
+                plot_reuse=False,
             )
 
 

@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import itertools
 from pathlib import Path
 
 import pandas as pd
@@ -23,7 +22,7 @@ TASK_DISPLAY = {
 }
 
 MODEL_DISPLAY = {
-    "google/gemma-2-2b-it": "Google/Gemma 2 2B it",
+    "google/gemma-2-2b-it": "Google/Gemma 2 2B IT",
     "google/gemma-2-2b": "Google/Gemma 2 2B",
     "meta-llama/Llama-3.2-3B-Instruct": "Llama-3.2-3B Instruct",
     "meta-llama/Llama-3.2-3B": "Llama-3.2-3B",
@@ -31,12 +30,19 @@ MODEL_DISPLAY = {
     "qwen3-8b": "Qwen3-8B",
 }
 
+METRIC_DISPLAY = {
+    "jaccard": "IoU (Intersection over Union)",
+    "overlap_coefficient": "Overlap Coefficient",
+    "containment": "Containment",
+    "intersection_size": "Intersection Size",
+}
+
+
+def format_metric_name(name: str) -> str:
+    return METRIC_DISPLAY.get(name, name.replace("_", " ").title())
+
 
 def load_circuits(results_dir: Path, tasks: list[str], K: int, threshold: int):
-    """Load shared_components for each task from metrics.json files.
-
-    Returns dict mapping task -> set of component strings.
-    """
     circuits = {}
     for run_dir in results_dir.iterdir():
         if not run_dir.is_dir():
@@ -46,45 +52,52 @@ def load_circuits(results_dir: Path, tasks: list[str], K: int, threshold: int):
             continue
         with open(metrics_file) as f:
             metrics = json.load(f)
+
         task = metrics["task"]
         if task not in tasks:
             continue
+
         k_data = metrics.get("by_k", {}).get(str(K))
         if k_data is None:
             continue
+
         t_data = k_data.get("thresholds", {}).get(str(threshold))
         if t_data is None:
             continue
+
         circuits[task] = set(t_data["shared_components"])
+
     return circuits
 
 
 def compute_overlap_metrics(circuits: dict[str, set], tasks: list[str]):
-    """Compute pairwise overlap metrics between all task circuits.
-
-    Returns a dict of metric_name -> DataFrame (tasks x tasks).
-    """
     n = len(tasks)
+
     jaccard = np.zeros((n, n))
     overlap_coeff = np.zeros((n, n))
-    intersection_frac = np.zeros((n, n))  # |A ∩ B| / |A| (row-normalized)
+    intersection_frac = np.zeros((n, n))
     intersection_size = np.zeros((n, n))
 
     for i, t1 in enumerate(tasks):
         for j, t2 in enumerate(tasks):
+
             if t1 not in circuits or t2 not in circuits:
                 jaccard[i, j] = overlap_coeff[i, j] = np.nan
                 intersection_frac[i, j] = intersection_size[i, j] = np.nan
                 continue
+
             a, b = circuits[t1], circuits[t2]
+
             inter = len(a & b)
             union = len(a | b)
+
             jaccard[i, j] = inter / union if union else 0
             overlap_coeff[i, j] = inter / min(len(a), len(b)) if min(len(a), len(b)) else 0
             intersection_frac[i, j] = inter / len(a) if len(a) else 0
             intersection_size[i, j] = inter
 
     labels = [TASK_DISPLAY.get(t, t) for t in tasks]
+
     return {
         "jaccard": pd.DataFrame(jaccard, index=labels, columns=labels),
         "overlap_coefficient": pd.DataFrame(overlap_coeff, index=labels, columns=labels),
@@ -93,258 +106,534 @@ def compute_overlap_metrics(circuits: dict[str, set], tasks: list[str]):
     }
 
 
-def plot_heatmap(df: pd.DataFrame, title: str, out_path: Path, fmt: str = ".2f",
-                 vmin: float = 0, vmax: float = 1, cmap: str = "YlOrRd"):
+def plot_heatmap(
+    df: pd.DataFrame,
+    title: str,
+    out_path: Path,
+    fmt: str = ".2f",
+    vmin: float = 0,
+    vmax: float = 1,
+    cmap: str = "YlOrRd",
+):
+
     fig, ax = plt.subplots(figsize=(8, 6.5))
+
     im = ax.imshow(df.values, vmin=vmin, vmax=vmax, cmap=cmap, aspect="equal")
+
     ax.set_xticks(range(len(df.columns)))
     ax.set_yticks(range(len(df.index)))
+
     ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=9)
     ax.set_yticklabels(df.index, fontsize=9)
+
     for i in range(len(df.index)):
         for j in range(len(df.columns)):
+
             v = df.values[i, j]
+
             if np.isnan(v):
                 continue
-            ax.text(j, i, f"{v:{fmt}}", ha="center", va="center", fontsize=8,
-                    color="white" if v > (vmax - vmin) * 0.65 + vmin else "black")
-    ax.set_title(title, fontsize=12, pad=10)
+
+            ax.text(
+                j,
+                i,
+                f"{v:{fmt}}",
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="white" if v > (vmax - vmin) * 0.65 + vmin else "black",
+            )
+
+    ax.set_title(title, fontsize=12, pad=10, loc="center")
+
     ax.set_xlabel("Task B", fontsize=10)
     ax.set_ylabel("Task A", fontsize=10)
+
     fig.colorbar(im, ax=ax, shrink=0.8)
+
     fig.tight_layout()
+
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
+
     plt.close(fig)
 
 
-def plot_multimodel_heatmap(all_dfs: dict[str, pd.DataFrame], metric_name: str,
-                            out_path: Path, fmt: str = ".2f",
-                            vmin: float = 0, vmax: float = 1, cmap: str = "YlOrRd"):
-    """Plot a grid of heatmaps, one per model."""
+def plot_multimodel_heatmap(
+    all_dfs: dict[str, pd.DataFrame],
+    metric_name: str,
+    out_path: Path,
+    K: int | None = None,
+    fmt: str = ".2f",
+    vmin: float = 0,
+    vmax: float = 1,
+    cmap: str = "YlOrRd",
+):
+
     models = list(all_dfs.keys())
+
     n = len(models)
+
     ncols = min(3, n)
     nrows = (n + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7 * ncols, 6 * nrows), squeeze=False)
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(6 * ncols + 1.5, 5.5 * nrows),
+        gridspec_kw={"wspace": 0.15, "hspace": 0.25},
+        squeeze=False,
+    )
 
     for idx, model in enumerate(models):
-        ax = axes[idx // ncols][idx % ncols]
+
+        row, col = idx // ncols, idx % ncols
+
+        ax = axes[row][col]
+
         df = all_dfs[model]
+
         im = ax.imshow(df.values, vmin=vmin, vmax=vmax, cmap=cmap, aspect="equal")
+
         ax.set_xticks(range(len(df.columns)))
         ax.set_yticks(range(len(df.index)))
-        ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=8)
-        ax.set_yticklabels(df.index, fontsize=8)
+
+        is_bottom = (row == nrows - 1) or (idx + ncols >= n)
+
+        if is_bottom:
+            ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=10)
+        else:
+            ax.set_xticklabels([])
+
+        if col == 0:
+            ax.set_yticklabels(df.index, fontsize=10)
+        else:
+            ax.set_yticklabels([])
+
         for i in range(len(df.index)):
             for j in range(len(df.columns)):
+
                 v = df.values[i, j]
+
                 if np.isnan(v):
                     continue
-                ax.text(j, i, f"{v:{fmt}}", ha="center", va="center", fontsize=7,
-                        color="white" if v > (vmax - vmin) * 0.65 + vmin else "black")
-        ax.set_title(MODEL_DISPLAY.get(model, model), fontsize=11)
 
-    # hide unused axes
+                ax.text(
+                    j,
+                    i,
+                    f"{v:{fmt}}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white" if v > (vmax - vmin) * 0.65 + vmin else "black",
+                )
+
+        ax.set_title(
+            MODEL_DISPLAY.get(model, model),
+            fontsize=13,
+            fontweight="bold",
+            pad=8,
+            loc="center",
+        )
+
     for idx in range(n, nrows * ncols):
         axes[idx // ncols][idx % ncols].set_visible(False)
 
-    fig.suptitle(f"Circuit overlap — {metric_name}", fontsize=14, y=1.01)
-    fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.6, label=metric_name)
-    fig.tight_layout()
+    metric_title = format_metric_name(metric_name)
+
+    suffix = f" (K={K}%)" if K is not None else ""
+
+    fig.suptitle(
+        f"Circuit Overlap — {metric_title}{suffix}",
+        fontsize=15,
+        fontweight="bold",
+        y=0.98,
+        ha="center",
+    )
+
+    cbar = fig.colorbar(
+        im,
+        ax=axes.ravel().tolist(),
+        shrink=0.5,
+        pad=0.03,
+        location="right",
+        label=metric_title,
+    )
+
+    cbar.ax.tick_params(labelsize=9)
+
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
+
     plt.close(fig)
 
 
 MODEL_TOTAL_COMPONENTS = {
-    "google/gemma-2-2b": 26 * (8 + 1),       # 234
-    "google/gemma-2-2b-it": 26 * (8 + 1),    # 234
-    "meta-llama/Llama-3.2-3B": 28 * (24 + 1),  # 700
-    "meta-llama/Llama-3.2-3B-Instruct": 28 * (24 + 1),  # 700
-    "qwen3-4b": 36 * (32 + 1),               # 1188
-    "qwen3-8b": 36 * (32 + 1),               # 1188  (8B uses same arch, more params per head)
+    "google/gemma-2-2b": 26 * (8 + 1),
+    "google/gemma-2-2b-it": 26 * (8 + 1),
+    "meta-llama/Llama-3.2-3B": 28 * (24 + 1),
+    "meta-llama/Llama-3.2-3B-Instruct": 28 * (24 + 1),
+    "qwen3-4b": 36 * (32 + 1),
+    "qwen3-8b": 36 * (32 + 1),
 }
 
 
-def plot_circuit_sizes(all_sizes: dict[str, dict[str, int]], out_path: Path,
-                       pct_path: Path | None = None,
-                       total_components: dict[str, int] | None = None):
-    """Bar chart of circuit sizes per model and task (absolute and relative)."""
+def plot_circuit_sizes(
+    all_sizes: dict[str, dict[str, int]],
+    out_path: Path,
+    pct_path: Path | None = None,
+    total_components: dict[str, int] | None = None,
+    K: int | None = None,
+):
+
+    title_suffix = f" (K={K})" if K is not None else ""
+
     df = pd.DataFrame(all_sizes).T
+
     df.columns = [TASK_DISPLAY.get(c, c) for c in df.columns]
+
     ax = df.plot.bar(figsize=(10, 5), rot=30)
-    ax.set_ylabel("Number of components")
-    ax.set_title("Shared circuit sizes")
+
+    ax.set_ylabel("Number of Components")
+
+    ax.set_title(f"Shared Circuit Sizes{title_suffix}", loc="center")
+
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+
     plt.tight_layout()
+
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
+
     plt.close()
 
-    # Relative version (% of total components)
     if total_components and pct_path:
+
         df_pct = pd.DataFrame(all_sizes).T.astype(float)
+
         df_pct.columns = [TASK_DISPLAY.get(c, c) for c in df_pct.columns]
+
         for model_label, total in total_components.items():
             if model_label in df_pct.index and total > 0:
                 df_pct.loc[model_label] = df_pct.loc[model_label] / total * 100
+
         ax = df_pct.plot.bar(figsize=(10, 5), rot=30)
-        ax.set_ylabel("% of total components")
-        ax.set_ylim(0, 100)
-        ax.set_title("Shared circuit sizes (% of model components)")
+
+        ax.set_ylabel("% of Total Components")
+
+        ax.set_ylim(0, 50)
+
+        ax.set_title(
+            f"Shared Circuit Sizes (% of Model Components){title_suffix}",
+            loc="center",
+        )
+
         ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+
         plt.tight_layout()
+
         plt.savefig(pct_path, dpi=200, bbox_inches="tight")
+
         plt.close()
 
 
+def plot_circuit_sizes_multi_k(
+    sizes_by_k: dict[int, dict[str, dict[str, int]]],
+    out_path: Path,
+    pct_path: Path | None = None,
+    total_components: dict[str, int] | None = None,
+):
+    k_values = sorted(sizes_by_k.keys())
+    ncols = min(3, len(k_values))
+    nrows = (len(k_values) + ncols - 1) // ncols
+
+    # --- absolute ---
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(7 * ncols, 5 * nrows),
+        squeeze=False,
+    )
+    for idx, K in enumerate(k_values):
+        ax = axes[idx // ncols][idx % ncols]
+        df = pd.DataFrame(sizes_by_k[K]).T
+        df.columns = [TASK_DISPLAY.get(c, c) for c in df.columns]
+        df.plot.bar(ax=ax, rot=30, legend=False)
+        ax.set_ylabel("Number of Components")
+        ax.set_title(f"K={K}%", fontweight="bold")
+    for idx in range(len(k_values), nrows * ncols):
+        axes[idx // ncols][idx % ncols].set_visible(False)
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, bbox_to_anchor=(1.02, 0.5), loc="center left", fontsize=8)
+    fig.suptitle("Shared Circuit Sizes", fontsize=14, fontweight="bold", y=1.0)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # --- percent ---
+    if total_components and pct_path:
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(7 * ncols, 5 * nrows),
+            squeeze=False,
+        )
+        for idx, K in enumerate(k_values):
+            ax = axes[idx // ncols][idx % ncols]
+            df_pct = pd.DataFrame(sizes_by_k[K]).T.astype(float)
+            df_pct.columns = [TASK_DISPLAY.get(c, c) for c in df_pct.columns]
+            for model_label, total in total_components.items():
+                if model_label in df_pct.index and total > 0:
+                    df_pct.loc[model_label] = df_pct.loc[model_label] / total * 100
+            df_pct.plot.bar(ax=ax, rot=30, legend=False)
+            ax.set_ylabel("% of Total Components")
+            ax.set_ylim(0, 50)
+            ax.set_title(f"K={K}%", fontweight="bold")
+        for idx in range(len(k_values), nrows * ncols):
+            axes[idx // ncols][idx % ncols].set_visible(False)
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        fig.legend(handles, labels, bbox_to_anchor=(1.02, 0.5), loc="center left", fontsize=8)
+        fig.suptitle("Shared Circuit Sizes (% of Model Components)", fontsize=14, fontweight="bold", y=1.0)
+        fig.tight_layout()
+        fig.savefig(pct_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+
+
 def discover_models(results_dir: Path) -> list[str]:
-    """Find all unique model names from metrics.json files."""
+
     models = set()
+
     for run_dir in results_dir.iterdir():
+
         metrics_file = run_dir / "metrics.json"
+
         if metrics_file.exists():
+
             with open(metrics_file) as f:
+
                 models.add(json.load(f)["model_name"])
+
     return sorted(models)
 
 
-def get_model_results_dir(results_dir: Path, model_name: str) -> Path:
-    """Return a filtered view by yielding only dirs matching this model."""
-    # We just use results_dir directly; load_circuits filters by task.
-    # But we need to filter by model. We'll create a helper.
-    return results_dir
+def load_circuits_for_model(
+    results_dir: Path,
+    model_name: str,
+    tasks: list[str],
+    K: int,
+    threshold: int,
+):
 
-
-def load_circuits_for_model(results_dir: Path, model_name: str,
-                            tasks: list[str], K: int, threshold: int):
     circuits = {}
+
     for run_dir in results_dir.iterdir():
+
         if not run_dir.is_dir():
             continue
+
         metrics_file = run_dir / "metrics.json"
+
         if not metrics_file.exists():
             continue
+
         with open(metrics_file) as f:
             metrics = json.load(f)
+
         if metrics["model_name"] != model_name:
             continue
+
         task = metrics["task"]
+
         if task not in tasks:
             continue
+
         k_data = metrics.get("by_k", {}).get(str(K))
+
         if k_data is None:
             continue
+
         t_data = k_data.get("thresholds", {}).get(str(threshold))
+
         if t_data is None:
             continue
+
         circuits[task] = set(t_data["shared_components"])
+
     return circuits
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Measure circuit overlap across tasks")
-    parser.add_argument("--results-dir", type=Path, required=True,
-                        help="Directory containing run subdirectories with metrics.json")
-    parser.add_argument("--output-dir", type=Path, required=True,
-                        help="Directory to save CSVs and plots")
-    parser.add_argument("--tasks", type=str,
-                        default="addition,arc_challenge,arc_easy,boolean,ioi,mcqa",
-                        help="Comma-separated task names")
-    parser.add_argument("--K", type=int, nargs="+", default=[50, 100],
-                        help="Top-K percentages to analyze")
-    parser.add_argument("--threshold", type=int, default=100,
-                        help="Reuse threshold percentage")
+
+    parser = argparse.ArgumentParser(
+        description="Measure circuit overlap across tasks"
+    )
+
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        required=True,
+        help="Directory containing run subdirectories with metrics.json",
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Directory to save CSVs and plots",
+    )
+
+    parser.add_argument(
+        "--tasks",
+        type=str,
+        default="addition,arc_challenge,arc_easy,boolean,ioi,mcqa",
+        help="Comma-separated task names",
+    )
+
+    parser.add_argument(
+        "--K",
+        type=int,
+        nargs="+",
+        default=[50, 100],
+        help="Top-K percentages to analyze",
+    )
+
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=100,
+        help="Reuse threshold percentage",
+    )
+
     args = parser.parse_args()
 
     tasks = args.tasks.split(",")
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
     models = discover_models(args.results_dir)
+
     print(f"Found models: {models}")
     print(f"Tasks: {tasks}")
     print(f"K values: {args.K}, threshold: {args.threshold}")
 
-    for K in args.K:
-        print(f"\n{'='*60}")
-        print(f"K = {K}")
-        print(f"{'='*60}")
+    sizes_by_k: dict[int, dict[str, dict[str, int]]] = {}
+    last_total_components: dict[str, int] = {}
 
-        all_metrics: dict[str, dict[str, pd.DataFrame]] = {}  # model -> metric -> df
+    for K in args.K:
+
+        print("\n" + "=" * 60)
+        print(f"K = {K}")
+        print("=" * 60)
+
+        all_metrics: dict[str, dict[str, pd.DataFrame]] = {}
         all_sizes: dict[str, dict[str, int]] = {}
 
         for model in models:
-            circuits = load_circuits_for_model(args.results_dir, model, tasks, K, args.threshold)
+
+            circuits = load_circuits_for_model(
+                args.results_dir,
+                model,
+                tasks,
+                K,
+                args.threshold,
+            )
+
             available = [t for t in tasks if t in circuits]
+
             if len(available) < 2:
                 print(f"  {model}: only {len(available)} tasks found, skipping")
                 continue
 
-            print(f"  {model}: {len(available)} tasks, sizes = "
-                  + ", ".join(f"{t}={len(circuits[t])}" for t in available))
+            print(
+                f"  {model}: {len(available)} tasks, sizes = "
+                + ", ".join(f"{t}={len(circuits[t])}" for t in available)
+            )
 
             metrics = compute_overlap_metrics(circuits, tasks)
+
             all_metrics[model] = metrics
 
             model_label = MODEL_DISPLAY.get(model, model)
-            all_sizes[model_label] = {t: len(circuits[t]) for t in tasks if t in circuits}
 
-            # Per-model plots and CSVs
+            all_sizes[model_label] = {
+                t: len(circuits[t]) for t in tasks if t in circuits
+            }
+
             model_slug = model.replace("/", "_")
+
             for metric_name, df in metrics.items():
+
                 csv_dir = args.output_dir / "csv" / metric_name
                 csv_dir.mkdir(parents=True, exist_ok=True)
+
                 df.to_csv(csv_dir / f"{model_slug}_K{K}_t{args.threshold}.csv")
 
                 plot_dir = args.output_dir / "per_model" / metric_name
                 plot_dir.mkdir(parents=True, exist_ok=True)
-                vmax = 1.0 if metric_name != "intersection_size" else df.values[~np.isnan(df.values)].max()
-                fmt = ".2f" if metric_name != "intersection_size" else ".0f"
-                plot_heatmap(df, f"{metric_name} — {MODEL_DISPLAY.get(model, model)} (K={K})",
-                             plot_dir / f"{model_slug}_K{K}_t{args.threshold}.png",
-                             fmt=fmt, vmax=vmax)
 
-        # Multi-model grid plots
-        if all_metrics:
-            multimodel_dir = args.output_dir / "multimodel"
-            multimodel_dir.mkdir(parents=True, exist_ok=True)
-            for metric_name in ["jaccard", "overlap_coefficient", "containment"]:
-                model_dfs = {m: all_metrics[m][metric_name] for m in all_metrics}
-                plot_multimodel_heatmap(model_dfs, metric_name,
-                                        multimodel_dir / f"{metric_name}_K{K}_t{args.threshold}.png")
-
-            # Circuit sizes bar chart
-            if all_sizes:
-                abs_dir = args.output_dir / "circuit_sizes" / "absolute"
-                pct_dir = args.output_dir / "circuit_sizes" / "percent"
-                abs_dir.mkdir(parents=True, exist_ok=True)
-                pct_dir.mkdir(parents=True, exist_ok=True)
-                totals = {MODEL_DISPLAY.get(m, m): MODEL_TOTAL_COMPONENTS.get(m, 0) for m in models}
-                plot_circuit_sizes(
-                    all_sizes,
-                    abs_dir / f"circuit_sizes_K{K}_t{args.threshold}.png",
-                    pct_path=pct_dir / f"circuit_sizes_pct_K{K}_t{args.threshold}.png",
-                    total_components=totals,
+                vmax = (
+                    1.0
+                    if metric_name != "intersection_size"
+                    else df.values[~np.isnan(df.values)].max()
                 )
 
-        # Summary CSV
-        csv_summary_dir = args.output_dir / "csv"
-        csv_summary_dir.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for model in all_metrics:
-            for metric_name, df in all_metrics[model].items():
-                for i, t1 in enumerate(df.index):
-                    for j, t2 in enumerate(df.columns):
-                        rows.append({
-                            "model": model,
-                            "task_a": t1,
-                            "task_b": t2,
-                            "metric": metric_name,
-                            "value": df.values[i, j],
-                            "K": K,
-                            "threshold": args.threshold,
-                        })
-        if rows:
-            summary = pd.DataFrame(rows)
-            summary.to_csv(csv_summary_dir / f"summary_K{K}_t{args.threshold}.csv", index=False)
-            print(f"\n  Summary saved to csv/summary_K{K}_t{args.threshold}.csv")
+                fmt = ".2f" if metric_name != "intersection_size" else ".0f"
+
+                metric_title = format_metric_name(metric_name)
+
+                plot_heatmap(
+                    df,
+                    f"{metric_title} — {MODEL_DISPLAY.get(model, model)} (K={K})",
+                    plot_dir / f"{model_slug}_K{K}_t{args.threshold}.png",
+                    fmt=fmt,
+                    vmax=vmax,
+                )
+
+        if all_metrics:
+
+            multimodel_dir = args.output_dir / "multimodel"
+            multimodel_dir.mkdir(parents=True, exist_ok=True)
+
+            for metric_name in ["jaccard", "overlap_coefficient", "containment"]:
+
+                model_dfs = {m: all_metrics[m][metric_name] for m in all_metrics}
+
+                plot_multimodel_heatmap(
+                    model_dfs,
+                    metric_name,
+                    multimodel_dir / f"{metric_name}_K{K}_t{args.threshold}.png",
+                    K=K,
+                )
+
+        if all_sizes:
+
+            abs_dir = args.output_dir / "circuit_sizes" / "absolute"
+            abs_dir.mkdir(parents=True, exist_ok=True)
+
+            pct_dir = args.output_dir / "circuit_sizes" / "percent"
+            pct_dir.mkdir(parents=True, exist_ok=True)
+
+            total_components = {
+                MODEL_DISPLAY.get(m, m): MODEL_TOTAL_COMPONENTS[m]
+                for m in all_metrics
+                if m in MODEL_TOTAL_COMPONENTS
+            }
+
+            plot_circuit_sizes(
+                all_sizes,
+                abs_dir / f"circuit_sizes_K{K}_t{args.threshold}.png",
+                pct_path=pct_dir / f"circuit_sizes_pct_K{K}_t{args.threshold}.png",
+                total_components=total_components,
+                K=K,
+            )
+
+            sizes_by_k[K] = all_sizes
+            last_total_components = total_components
+
+    if len(sizes_by_k) > 1:
+        multi_k_dir = args.output_dir / "circuit_sizes" / "multi_k"
+        multi_k_dir.mkdir(parents=True, exist_ok=True)
+        plot_circuit_sizes_multi_k(
+            sizes_by_k,
+            multi_k_dir / f"circuit_sizes_by_k_t{args.threshold}.png",
+            pct_path=multi_k_dir / f"circuit_sizes_pct_by_k_t{args.threshold}.png",
+            total_components=last_total_components,
+        )
 
     print("\nDone!")
 
