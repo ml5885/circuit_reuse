@@ -113,27 +113,26 @@ def plot_heatmap(
     # --- MLP panel ---
     ax_mlp.imshow(freq_mlp, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
     ax_mlp.set_xticks(range(n_k))
-    ax_mlp.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=8, rotation=45, ha="right")
+    ax_mlp.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=12, rotation=45, ha="right")
     ax_mlp.set_yticks(range(n_mlp))
-    ax_mlp.set_yticklabels(list(range(n_mlp - 1, -1, -1)), fontsize=7)
-    ax_mlp.set_xlabel("Top-K%", fontsize=9)
-    ax_mlp.set_ylabel("Layer", fontsize=10)
-    ax_mlp.set_title("MLP", fontsize=11)
+    ax_mlp.set_yticklabels(list(range(n_mlp - 1, -1, -1)), fontsize=10)
+    ax_mlp.set_xlabel("Top-K%", fontsize=14)
+    ax_mlp.set_ylabel("Layer", fontsize=14)
+    ax_mlp.set_title("MLP", fontsize=16)
 
     # --- Head panel ---
     n_heads_per_layer = sum(1 for l in labels if l.startswith("L0 H"))
     im = ax_head.imshow(freq_head, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
     ax_head.set_xticks(range(n_k))
-    ax_head.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=8, rotation=45, ha="right")
-    ax_head.set_xlabel("Top-K%", fontsize=9)
-    ax_head.set_title("Attention Heads", fontsize=11)
+    ax_head.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=12, rotation=45, ha="right")
+    ax_head.set_xlabel("Top-K%", fontsize=14)
+    ax_head.set_title("Attention Heads", fontsize=16)
 
     # Y-axis: tick at center of each layer block (reversed: last layer at top)
     n_layers = n_mlp
     tick_positions = []
     tick_labels_y = []
     for layer in range(n_layers):
-        # In reversed order, layer (n_layers-1-layer) maps to row position layer
         row_start = layer * n_heads_per_layer
         mid = row_start + (n_heads_per_layer - 1) / 2
         tick_positions.append(mid)
@@ -142,8 +141,8 @@ def plot_heatmap(
             ax_head.axhline(y=row_start - 0.5, color="gray", linewidth=0.3, alpha=0.5)
 
     ax_head.set_yticks(tick_positions)
-    ax_head.set_yticklabels(tick_labels_y, fontsize=7)
-    ax_head.set_ylabel("Layer", fontsize=10)
+    ax_head.set_yticklabels(tick_labels_y, fontsize=10)
+    ax_head.set_ylabel("Layer", fontsize=14)
 
     # Head index labels on the right y-axis
     ax_head_r = ax_head.twinx()
@@ -151,14 +150,16 @@ def plot_heatmap(
     ax_head_r.set_yticks(range(n_head))
     ax_head_r.set_yticklabels(
         [f"H{(n_heads_per_layer - 1) - (i % n_heads_per_layer)}" for i in range(n_head)],
-        fontsize=max(2, min(5, 200 / n_head)),
+        fontsize=max(3, min(7, 300 / n_head)),
         family="monospace",
     )
     ax_head_r.tick_params(length=0)
 
-    fig.colorbar(im, cax=ax_cbar, label="Fraction of examples")
+    cbar = fig.colorbar(im, cax=ax_cbar)
+    cbar.set_label("Fraction of examples", fontsize=13)
+    cbar.ax.tick_params(labelsize=10)
 
-    fig.suptitle(f"{model_disp} — {task_disp}", fontsize=13)
+    fig.suptitle(f"{model_disp} — {task_disp}", fontsize=18)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -179,23 +180,31 @@ def _split_mlp_head(freq: np.ndarray, labels: list[str]):
     )
 
 
-def _setup_mlp_ax(ax, freq_mlp, n_mlp, k_percents, cmap, model_disp):
+def _setup_mlp_ax(ax, freq_mlp, n_mlp, k_percents, cmap, model_disp, show_xlabel=True):
     """Configure a single MLP heatmap axis."""
     n_k = len(k_percents)
     ax.imshow(freq_mlp, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
     ax.set_xticks(range(n_k))
-    ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=7, rotation=45, ha="right")
+    if show_xlabel:
+        ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=11, rotation=45, ha="right")
+        ax.set_xlabel("Top-K%", fontsize=13)
+    else:
+        ax.set_xticklabels([])
     ax.set_yticks(range(n_mlp))
-    ax.set_yticklabels(list(range(n_mlp - 1, -1, -1)), fontsize=6)
-    ax.set_title(model_disp, fontsize=9)
+    ax.set_yticklabels(list(range(n_mlp - 1, -1, -1)), fontsize=9)
+    ax.set_title(model_disp, fontsize=14)
 
 
-def _setup_head_ax(ax, freq_head, n_head, n_layers, n_heads_per_layer, k_percents, cmap, model_disp):
+def _setup_head_ax(ax, freq_head, n_head, n_layers, n_heads_per_layer, k_percents, cmap, model_disp, show_xlabel=True):
     """Configure a single attention head heatmap axis."""
     n_k = len(k_percents)
     ax.imshow(freq_head, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
     ax.set_xticks(range(n_k))
-    ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=7, rotation=45, ha="right")
+    if show_xlabel:
+        ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=11, rotation=45, ha="right")
+        ax.set_xlabel("Top-K%", fontsize=13)
+    else:
+        ax.set_xticklabels([])
 
     tick_positions = []
     tick_labels_y = []
@@ -208,78 +217,84 @@ def _setup_head_ax(ax, freq_head, n_head, n_layers, n_heads_per_layer, k_percent
             ax.axhline(y=row_start - 0.5, color="gray", linewidth=0.3, alpha=0.5)
 
     ax.set_yticks(tick_positions)
-    ax.set_yticklabels(tick_labels_y, fontsize=6)
-    ax.set_title(model_disp, fontsize=9)
+    ax.set_yticklabels(tick_labels_y, fontsize=9)
+    ax.set_title(model_disp, fontsize=14)
 
 
-def plot_multimodel(
+def plot_multitask(
     all_data: dict[str, tuple[np.ndarray, list[str]]],
     k_percents: list[float],
-    task: str,
+    model_name: str,
     output_dir: Path,
 ):
-    """Plot 2x3 grids of MLP and head heatmaps for all models on one task."""
-    models = sorted(all_data.keys())
-    if len(models) > 6:
-        models = models[:6]
+    """Plot 2-row grids of MLP and head heatmaps for all tasks on one model."""
+    tasks = sorted(all_data.keys())
+    ncols = 4
+    nrows = math.ceil(len(tasks) / ncols)
 
-    nrows, ncols = 2, 3
-    task_disp = get_task_display_name(task)
+    model_disp = get_model_display_name(model_name)
+    safe_model = model_name.replace("/", "_")
     cmap = LinearSegmentedColormap.from_list("circuit", ["#f7f7f7", "#2166ac"], N=256)
 
     # --- MLP multiplot ---
-    fig_mlp, axes_mlp = plt.subplots(nrows, ncols, figsize=(16, 10))
-    for idx, model_name in enumerate(models):
+    fig_mlp, axes_mlp = plt.subplots(nrows, ncols, figsize=(20, 5 * nrows))
+    if nrows == 1:
+        axes_mlp = axes_mlp[np.newaxis, :]
+    for idx, task in enumerate(tasks):
         r, c = divmod(idx, ncols)
         ax = axes_mlp[r, c]
-        freq, labels = all_data[model_name]
+        freq, labels = all_data[task]
         freq_m, _, n_mlp, _, _ = _split_mlp_head(freq, labels)
-        model_disp = get_model_display_name(model_name)
-        _setup_mlp_ax(ax, freq_m, n_mlp, k_percents, cmap, model_disp)
+        task_disp = get_task_display_name(task)
+        is_bottom_row = r == nrows - 1
+        _setup_mlp_ax(ax, freq_m, n_mlp, k_percents, cmap, task_disp, show_xlabel=is_bottom_row)
         if c == 0:
-            ax.set_ylabel("Layer", fontsize=9)
+            ax.set_ylabel("Layer", fontsize=13)
 
-    # Hide unused axes
-    for idx in range(len(models), nrows * ncols):
+    for idx in range(len(tasks), nrows * ncols):
         r, c = divmod(idx, ncols)
         axes_mlp[r, c].set_visible(False)
 
-    fig_mlp.suptitle(f"{task_disp} — MLP Component Membership", fontsize=14)
+    fig_mlp.suptitle(f"{model_disp} — MLP Component Membership", fontsize=18, x=0.45)
     fig_mlp.tight_layout(rect=[0, 0, 0.93, 0.95])
-    # Shared colorbar
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
     cbar = fig_mlp.colorbar(sm, ax=axes_mlp.ravel().tolist(), shrink=0.6, pad=0.02)
-    cbar.set_label("Fraction of examples", fontsize=9)
+    cbar.set_label("Fraction of examples", fontsize=13)
+    cbar.ax.tick_params(labelsize=10)
 
-    out = output_dir / "multiplots" / f"{task}_mlp.png"
+    out = output_dir / "multiplots" / f"{safe_model}_mlp.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     fig_mlp.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig_mlp)
     print(f"[SAVED] {out}")
 
     # --- Head multiplot ---
-    fig_head, axes_head = plt.subplots(nrows, ncols, figsize=(18, 10))
-    for idx, model_name in enumerate(models):
+    fig_head, axes_head = plt.subplots(nrows, ncols, figsize=(22, 5 * nrows))
+    if nrows == 1:
+        axes_head = axes_head[np.newaxis, :]
+    for idx, task in enumerate(tasks):
         r, c = divmod(idx, ncols)
         ax = axes_head[r, c]
-        freq, labels = all_data[model_name]
+        freq, labels = all_data[task]
         _, freq_h, n_mlp, n_head, n_hpl = _split_mlp_head(freq, labels)
-        model_disp = get_model_display_name(model_name)
-        _setup_head_ax(ax, freq_h, n_head, n_mlp, n_hpl, k_percents, cmap, model_disp)
+        task_disp = get_task_display_name(task)
+        is_bottom_row = r == nrows - 1
+        _setup_head_ax(ax, freq_h, n_head, n_mlp, n_hpl, k_percents, cmap, task_disp, show_xlabel=is_bottom_row)
         if c == 0:
-            ax.set_ylabel("Layer", fontsize=9)
+            ax.set_ylabel("Layer", fontsize=13)
 
-    for idx in range(len(models), nrows * ncols):
+    for idx in range(len(tasks), nrows * ncols):
         r, c = divmod(idx, ncols)
         axes_head[r, c].set_visible(False)
 
-    fig_head.suptitle(f"{task_disp} — Attention Head Component Membership", fontsize=14)
+    fig_head.suptitle(f"{model_disp} — Attention Head Component Membership", fontsize=18, x=0.45)
     fig_head.tight_layout(rect=[0, 0, 0.93, 0.95])
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
     cbar = fig_head.colorbar(sm, ax=axes_head.ravel().tolist(), shrink=0.6, pad=0.02)
-    cbar.set_label("Fraction of examples", fontsize=9)
+    cbar.set_label("Fraction of examples", fontsize=13)
+    cbar.ax.tick_params(labelsize=10)
 
-    out = output_dir / "multiplots" / f"{task}_heads.png"
+    out = output_dir / "multiplots" / f"{safe_model}_heads.png"
     fig_head.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig_head)
     print(f"[SAVED] {out}")
@@ -331,8 +346,8 @@ def main():
         print(f"No attribution JSONL files found in {cache_dir}")
         return
 
-    # First pass: load all data, grouped by task
-    by_task: dict[str, dict[str, tuple[np.ndarray, list[str]]]] = {}
+    # First pass: load all data, grouped by model
+    by_model: dict[str, dict[str, tuple[np.ndarray, list[str]]]] = {}
 
     for path in attrib_files:
         info = parse_attrib_filename(path)
@@ -356,12 +371,12 @@ def main():
         out_path = output_dir / task / f"{safe_model}.png"
         plot_heatmap(freq, labels, k_percents, model_name, task, out_path)
 
-        by_task.setdefault(task, {})[model_name] = (freq, labels)
+        by_model.setdefault(model_name, {})[task] = (freq, labels)
 
-    # Second pass: multimodel plots per task
-    for task, all_data in by_task.items():
+    # Second pass: multitask plots per model
+    for model_name, all_data in by_model.items():
         if len(all_data) >= 2:
-            plot_multimodel(all_data, k_percents, task, output_dir)
+            plot_multitask(all_data, k_percents, model_name, output_dir)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,7 @@ def parse_args() -> argparse.Namespace:
         default="95,96,97,98,99,100",
         help="Comma-separated list of reuse thresholds p as percentages (e.g., '95,99,100' for reuse@95..).",
     )
-    parser.add_argument("--method", type=str, default="eap", choices=["eap", "gradient"], help="Attribution method.")
+    parser.add_argument("--method", type=str, default="eap", choices=["eap", "gradient", "neuron_attr"], help="Attribution method.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--output-dir", type=str, default="results")
@@ -121,6 +121,13 @@ def parse_args() -> argparse.Namespace:
         help="Random seed for dataset generation and train/val shuffle (default: 42).",
     )
     parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help="Absolute score threshold as fraction of total score (e.g., 0.005 for τ=0.5%%). "
+             "When set, replaces top-K percentage logic. Works with cached scores.",
+    )
+    parser.add_argument(
         "--granularity",
         type=str,
         default="head_mlp",
@@ -137,7 +144,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _enumerate_all_components(model, granularity="head_mlp"):
+def _enumerate_all_components(model, granularity="head_mlp", method="eap"):
     n_layers = model.cfg.n_layers
     n_heads = model.cfg.n_heads
     comps = []
@@ -147,7 +154,11 @@ def _enumerate_all_components(model, granularity="head_mlp"):
         else:
             for h in range(n_heads):
                 comps.append(Component(layer=layer, kind="head", index=h))
-        comps.append(Component(layer=layer, kind="mlp", index=0))
+        if method == "neuron_attr":
+            for i in range(model.cfg.d_mlp):
+                comps.append(Component(layer=layer, kind="neuron", index=i))
+        else:
+            comps.append(Component(layer=layer, kind="mlp", index=0))
     return comps
 
 
@@ -185,6 +196,16 @@ def _build_topk_example_sets(per_example_scores: List[Dict[Component, float]], k
     for sc in per_example_scores:
         ranked = sorted(sc.items(), key=lambda x: x[1], reverse=True)
         sets.append({c for c, _ in ranked[:take_components]})
+    return sets
+
+
+def _build_threshold_example_sets(per_example_scores: List[Dict[Component, float]], tau: float) -> List[set]:
+    """Build sets of components whose |score| >= tau * sum(|all scores|) for each example."""
+    sets = []
+    for sc in per_example_scores:
+        total = sum(abs(v) for v in sc.values())
+        cutoff = tau * total
+        sets.append({c for c, v in sc.items() if abs(v) >= cutoff})
     return sets
 
 
@@ -226,25 +247,18 @@ def _sample_control_components(
         return rng.sample(pool, n_to_sample)
 
     # Count how many of each type are in the shared circuit
-    n_shared_heads = sum(1 for c in shared if c.kind == "head")
-    n_shared_mlps = sum(1 for c in shared if c.kind == "mlp")
-
-    # Build pools for heads and mlps
-    if parity:
-        head_pool = [c for c in all_components if c.kind == "head"]
-        mlp_pool = [c for c in all_components if c.kind == "mlp"]
-    else:
-        head_pool = [c for c in all_components if c.kind == "head" and c not in shared]
-        mlp_pool = [c for c in all_components if c.kind == "mlp" and c not in shared]
-
-    n_shared_heads = min(n_shared_heads, len(head_pool))
-    n_shared_mlps = min(n_shared_mlps, len(mlp_pool))
-
+    shared_set = set(shared)
+    kinds = {c.kind for c in shared}
     sampled = []
-    if n_shared_heads > 0:
-        sampled.extend(rng.sample(head_pool, n_shared_heads))
-    if n_shared_mlps > 0:
-        sampled.extend(rng.sample(mlp_pool, n_shared_mlps))
+    for kind in kinds:
+        n_kind = sum(1 for c in shared if c.kind == kind)
+        if parity:
+            pool = [c for c in all_components if c.kind == kind]
+        else:
+            pool = [c for c in all_components if c.kind == kind and c not in shared_set]
+        n_kind = min(n_kind, len(pool))
+        if n_kind > 0:
+            sampled.extend(rng.sample(pool, n_kind))
 
     return sampled
 
@@ -311,6 +325,7 @@ def _run_single_combination(
     seed: int,
     results_home: Path | None = None,
     granularity: str = "head_mlp",
+    score_threshold: float | None = None,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -424,7 +439,109 @@ def _run_single_combination(
         "by_k": {},
     }
 
-    all_components = _enumerate_all_components(model, granularity=granularity)
+    all_components = _enumerate_all_components(model, granularity=granularity, method=method)
+
+    # Score threshold mode: use absolute score threshold instead of top-K
+    if score_threshold is not None:
+        metrics["score_threshold"] = score_threshold
+        sets_tau = _build_threshold_example_sets(example_scores, score_threshold)
+        avg_circuit_size = sum(len(s) for s in sets_tau) / max(1, len(sets_tau))
+        counts = _count_components(sets_tau)
+        n_ex = len(sets_tau)
+
+        per_thresh = {}
+        for p in metrics["reuse_thresholds"]:
+            thr = max(0, min(100, int(p)))
+            need = int(math.ceil(thr / 100.0 * n_ex))
+            shared = [c for c, cnt in counts.items() if cnt >= need]
+            shared_size = len(shared)
+            reuse_percent = float(min(shared_size, avg_circuit_size) / max(1, avg_circuit_size) * 100.0)
+
+            rng_seed = int(hashlib.md5(f"{combo_key_root}|tau{score_threshold}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
+            rng = random.Random(rng_seed)
+            control_removed = _sample_control_components(shared, all_components, rng, ignore_type=ignore_type) if shared_size > 0 else []
+
+            if shared_size > 0:
+                ablation_train_correct, ablation_train_total, ablation_train_preds = evaluate_predictions(
+                    model, train_examples, task=task, removed=shared, verbose=debug
+                )
+            else:
+                ablation_train_correct, ablation_train_total = baseline_train_correct, baseline_train_total
+                ablation_train_preds = [{"is_correct": True}] * len(train_examples)
+            if len(control_removed) > 0:
+                control_train_correct, control_train_total, control_train_preds = evaluate_predictions(
+                    model, train_examples, task=task, removed=control_removed, verbose=debug
+                )
+            else:
+                control_train_correct, control_train_total = baseline_train_correct, baseline_train_total
+                control_train_preds = [{"is_correct": True}] * len(train_examples)
+
+            ablation_train_acc = ablation_train_correct / ablation_train_total if ablation_train_total > 0 else 0.0
+            control_train_acc = control_train_correct / control_train_total if control_train_total > 0 else 0.0
+
+            if val_examples:
+                if shared_size > 0:
+                    ablation_val_correct, ablation_val_total, ablation_val_preds = evaluate_predictions(
+                        model, val_examples, task=task, removed=shared, verbose=debug
+                    )
+                else:
+                    ablation_val_correct, ablation_val_total = baseline_val_correct, baseline_val_total
+                    ablation_val_preds = [{"is_correct": True}] * len(val_examples)
+                if len(control_removed) > 0:
+                    control_val_correct, control_val_total, control_val_preds = evaluate_predictions(
+                        model, val_examples, task=task, removed=control_removed, verbose=debug
+                    )
+                else:
+                    control_val_correct, control_val_total = baseline_val_correct, baseline_val_total
+                    control_val_preds = [{"is_correct": True}] * len(val_examples)
+                ablation_val_acc = ablation_val_correct / ablation_val_total if ablation_val_total > 0 else float("nan")
+                control_val_acc = control_val_correct / control_val_total if control_val_total > 0 else float("nan")
+            else:
+                ablation_val_acc = control_val_acc = float("nan")
+                ablation_val_preds = control_val_preds = []
+
+            shared_flags_train = [1 if r.get("is_correct") else 0 for r in ablation_train_preds]
+            control_flags_train = [1 if r.get("is_correct") else 0 for r in control_train_preds]
+            perm_train = _permutation_test(
+                shared_flags_train, control_flags_train, trials=int(perm_trials), rng=random.Random(rng_seed + 1)
+            ) if len(shared_flags_train) == len(control_flags_train) else {"p_value": 1.0, "obs_diff": 0.0, "trials": 0}
+
+            if val_examples:
+                shared_flags_val = [1 if r.get("is_correct") else 0 for r in ablation_val_preds]
+                control_flags_val = [1 if r.get("is_correct") else 0 for r in control_val_preds]
+                perm_val = _permutation_test(
+                    shared_flags_val, control_flags_val, trials=int(perm_trials), rng=random.Random(rng_seed + 2)
+                ) if len(shared_flags_val) == len(control_flags_val) else {"p_value": 1.0, "obs_diff": 0.0, "trials": 0}
+            else:
+                perm_val = {"p_value": float("nan"), "obs_diff": float("nan"), "trials": 0}
+
+            thresh_entry = {
+                "threshold": thr,
+                "shared_circuit_size": shared_size,
+                "avg_circuit_size": avg_circuit_size,
+                "reuse_percent": reuse_percent,
+                "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
+                "rng_seed": rng_seed,
+                "train": {
+                    "ablation_accuracy": ablation_train_acc,
+                    "control_accuracy": control_train_acc,
+                    "accuracy_drop_ablation": baseline_train_acc - ablation_train_acc,
+                    "accuracy_drop_control": baseline_train_acc - control_train_acc,
+                    "knockout_diff": _safe_div(baseline_train_acc - ablation_train_acc, baseline_train_acc - control_train_acc),
+                    "permutation": perm_train,
+                },
+                "val": {
+                    "ablation_accuracy": ablation_val_acc,
+                    "control_accuracy": control_val_acc,
+                    "accuracy_drop_ablation": (baseline_val_acc - ablation_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "accuracy_drop_control": (baseline_val_acc - control_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "knockout_diff": _safe_div(baseline_val_acc - ablation_val_acc, baseline_val_acc - control_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "permutation": perm_val,
+                },
+            }
+            per_thresh[str(thr)] = thresh_entry
+
+        metrics["by_threshold"] = {str(score_threshold): {"thresholds": per_thresh}}
 
     # Loop over K and thresholds
     for K in metrics["top_k_list"]:
@@ -595,6 +712,9 @@ def main():
         results_home_dir = (Path(args.results_home) / base_run_dir.name / combo_name) if args.results_home else None
         print(f"\n[RUN] {combo_name}")
 
+        # neuron_attr forces neuron-level granularity
+        granularity = "head_mlp" if args.method == "neuron_attr" else args.granularity
+
         _run_single_combination(
             model=model,
             model_name=args.model_name,
@@ -617,7 +737,8 @@ def main():
             force_extract=args.force_extract,
             seed=args.seed,
             results_home=results_home_dir,
-            granularity=args.granularity,
+            granularity=granularity,
+            score_threshold=args.score_threshold,
         )
     except Exception as e:
         print(f"[FATAL] {e}")

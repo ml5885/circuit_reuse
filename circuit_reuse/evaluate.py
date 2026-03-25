@@ -143,6 +143,11 @@ def evaluate_accuracy_with_ablation(
                 act[:, :, :] = 0.0
                 return act
             hooks.append((f"blocks.{comp.layer}.hook_mlp_out", hook_mlp))
+        elif comp.kind == "neuron":
+            def hook_neuron(act, hook=None, neuron_idx=comp.index):
+                act[:, :, neuron_idx] = 0.0
+                return act
+            hooks.append((f"blocks.{comp.layer}.mlp.hook_post", hook_neuron))
 
     correct, total = 0, 0
     device = model.cfg.device
@@ -208,6 +213,11 @@ def evaluate_predictions(
                     act[:, :, :] = 0.0
                     return act
                 hooks.append((f"blocks.{comp.layer}.hook_mlp_out", hook_mlp))
+            elif comp.kind == "neuron":
+                def hook_neuron(act, hook=None, neuron_idx=comp.index):
+                    act[:, :, neuron_idx] = 0.0
+                    return act
+                hooks.append((f"blocks.{comp.layer}.mlp.hook_post", hook_neuron))
 
     per_ex: List[Dict[str, Any]] = []
     correct, total = 0, 0
