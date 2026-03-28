@@ -135,6 +135,12 @@ def parse_args() -> argparse.Namespace:
         help="Node granularity for circuit extraction (default: head_mlp).",
     )
     parser.add_argument(
+        "--max-prompt-chars",
+        type=int,
+        default=None,
+        help="Max prompt character length for MMLU. When set, samples from multiple short subjects and filters long prompts.",
+    )
+    parser.add_argument(
         "--results-home",
         type=str,
         default=None,
@@ -326,11 +332,12 @@ def _run_single_combination(
     results_home: Path | None = None,
     granularity: str = "head_mlp",
     score_threshold: float | None = None,
+    max_prompt_chars: int | None = None,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
 
-    dataset = get_dataset(task, num_examples=num_examples, digits=digits if digits is not None else 0)
+    dataset = get_dataset(task, num_examples=num_examples, digits=digits if digits is not None else 0, max_prompt_chars=max_prompt_chars)
     print(f"[{model_name}/{task}] Generated {len(dataset)} examples for method '{method}'.")
 
     # Split into train/val
@@ -739,6 +746,7 @@ def main():
             results_home=results_home_dir,
             granularity=granularity,
             score_threshold=args.score_threshold,
+            max_prompt_chars=args.max_prompt_chars,
         )
     except Exception as e:
         print(f"[FATAL] {e}")

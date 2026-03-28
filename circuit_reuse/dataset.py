@@ -137,41 +137,70 @@ class BooleanDataset:
         return iter(self._examples)
 
 
+MMLU_SHORT_SUBJECTS = [
+    "world_religions", "clinical_knowledge", "international_law", "management",
+    "electrical_engineering", "conceptual_physics", "sociology", "human_aging",
+    "medical_genetics", "philosophy", "us_foreign_policy", "anatomy", "astronomy",
+    "high_school_geography", "security_studies", "miscellaneous", "virology",
+    "prehistory", "nutrition", "high_school_macroeconomics",
+    "high_school_government_and_politics", "moral_disputes",
+    "high_school_microeconomics", "human_sexuality", "logical_fallacies",
+    "jurisprudence", "global_facts", "elementary_mathematics", "computer_security",
+    "abstract_algebra", "high_school_chemistry", "public_relations",
+]
+
+
 class MMLUDataset:
+    @staticmethod
+    def _make_example(item: dict, max_prompt_chars: int | None = None) -> Example | None:
+        q = item["question"]
+        choices = item["choices"]
+        ans_idx = item["answer"]
+
+        prompt = f"{q}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer: "
+        if max_prompt_chars is not None and len(prompt) > max_prompt_chars:
+            return None
+        target = chr(ord("A") + ans_idx)
+        labels = ["A", "B", "C", "D"]
+
+        shuffled = choices[:]
+        random.shuffle(shuffled)
+        correct_answer_text = choices[ans_idx]
+        new_ans_idx = shuffled.index(correct_answer_text)
+
+        corrupted_prompt = (
+            f"{q}\n"
+            f"A. {shuffled[0]}\n"
+            f"B. {shuffled[1]}\n"
+            f"C. {shuffled[2]}\n"
+            f"D. {shuffled[3]}\n"
+            f"Answer: "
+        )
+        corrupted_target = chr(ord("A") + new_ans_idx)
+        return Example(prompt, target, corrupted_prompt, corrupted_target, labels=labels, answer_idx=ans_idx)
+
     def __init__(
-        self, subject: str = "high_school_european_history", split: str = "test", num_examples: int | None = None
+        self,
+        subject: str = "high_school_european_history",
+        split: str = "test",
+        num_examples: int | None = None,
+        max_prompt_chars: int | None = None,
     ) -> None:
-        ds = load_dataset("cais/mmlu", subject, split=split)
+        subjects = MMLU_SHORT_SUBJECTS if max_prompt_chars is not None else [subject]
         self._examples: List[Example] = []
-        for i, item in enumerate(ds):
-            q = item["question"]
-            choices = item["choices"]
-            ans_idx = item["answer"]
-
-            prompt = f"{q}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer: "
-            target = chr(ord("A") + ans_idx)
-            labels = ["A", "B", "C", "D"]
-
-            shuffled = choices[:]
-            random.shuffle(shuffled)
-            correct_answer_text = choices[ans_idx]
-            new_ans_idx = shuffled.index(correct_answer_text)
-
-            corrupted_prompt = (
-                f"{q}\n"
-                f"A. {shuffled[0]}\n"
-                f"B. {shuffled[1]}\n"
-                f"C. {shuffled[2]}\n"
-                f"D. {shuffled[3]}\n"
-                f"Answer: "
-            )
-            corrupted_target = chr(ord("A") + new_ans_idx)
-
-            self._examples.append(
-                Example(prompt, target, corrupted_prompt, corrupted_target, labels=labels, answer_idx=ans_idx)
-            )
-            if num_examples is not None and i + 1 >= num_examples:
+        for subj in subjects:
+            ds = load_dataset("cais/mmlu", subj, split=split)
+            for item in ds:
+                ex = self._make_example(item, max_prompt_chars)
+                if ex is not None:
+                    self._examples.append(ex)
+                if num_examples is not None and len(self._examples) >= num_examples:
+                    break
+            if num_examples is not None and len(self._examples) >= num_examples:
                 break
+        random.shuffle(self._examples)
+        if num_examples is not None:
+            self._examples = self._examples[:num_examples]
 
     def __len__(self) -> int:
         return len(self._examples)
@@ -309,6 +338,8 @@ MODEL_DISPLAY_NAMES: dict[str, str] = {
     "meta-llama/Llama-3.2-3B-Instruct": "Llama-3.2-3B Instruct",
     "gemma-2-2b": "Gemma 2 2B",
     "gemma-2-2b-it": "Gemma 2 2B Instruct",
+    "google/gemma-2-2b": "Gemma 2 2B",
+    "google/gemma-2-2b-it": "Gemma 2 2B Instruct",
     "allenai/OLMo-2-0425-1B-early-training": "OLMo-2-1B"
 }
 
@@ -335,13 +366,13 @@ def get_model_display_name(model: str) -> str:
     return " ".join([first] + rest)
 
 
-def get_dataset(task: str, num_examples: int = 100, digits: int = 2) -> Iterable[Example]:
+def get_dataset(task: str, num_examples: int = 100, digits: int = 2, max_prompt_chars: int | None = None) -> Iterable[Example]:
     if task == "addition":
         return AdditionDataset(num_examples=num_examples, digits=digits)
     if task == "boolean":
         return BooleanDataset(num_examples=num_examples)
     if task == "mmlu":
-        return MMLUDataset(split="test", num_examples=num_examples)
+        return MMLUDataset(split="test", num_examples=num_examples, max_prompt_chars=max_prompt_chars)
     if task == "ioi":
         return IOIDataset(split="test", num_examples=num_examples)
     if task == "mcqa":

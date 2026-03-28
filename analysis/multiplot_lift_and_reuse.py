@@ -178,8 +178,10 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
 
     ps_sorted = sorted(df_k["reuse_threshold"].dropna().unique().tolist())
     norm = Normalize(vmin=min(ps_sorted), vmax=max(ps_sorted))
-    cmap = plt.get_cmap("viridis")
-    colors = {p: cmap(norm(p)) for p in ps_sorted}
+    cmap_lift = plt.get_cmap("viridis")
+    cmap_reuse = plt.get_cmap("magma")
+    colors_lift = {p: cmap_lift(norm(p)) for p in ps_sorted}
+    colors_reuse = {p: cmap_reuse(norm(p)) for p in ps_sorted}
     
     # Custom sorting for models
     def model_sort_key(model_name):
@@ -214,10 +216,10 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
         shared_plot_params["figsize"] = (14, 6)
         bbox_to_anchor = (0.5, -0.5)
 
-    shared_ticklabel_params = {"rotation": 30, "ha": "right", "fontsize": FONT_SIZES["tick"]}
+    shared_ticklabel_params = {"rotation": 30, "ha": "right", "fontsize": 18}
     shared_grid_params = {"axis": "y", "linestyle": "-", "alpha": 0.8}
 
-    def _plot_bars(ax, metric_map, ylabel, ylim, show_ylabel, show_xlabel):
+    def _plot_bars(ax, metric_map, ylabel, ylim, show_ylabel, show_xlabel, color_map):
         xloc = np.arange(len(models))
         nP = len(ps_sorted)
         width = min(0.8 / max(1, nP), 0.25)
@@ -231,7 +233,7 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
                         xloc[j] + offs[i],
                         y,
                         width=width,
-                        color=colors[p],
+                        color=color_map[p],
                         edgecolor="black",
                         linewidth=0.4
                     )
@@ -242,11 +244,11 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
         else:
             ax.set_xticklabels([])
 
-        ax.tick_params(axis="y", labelsize=20)
+        ax.tick_params(axis="y", labelsize=18)
 
         if show_ylabel:
-            ax.set_ylabel(ylabel, fontsize=20)
-            ax.tick_params(axis="y", labelsize=FONT_SIZES["tick"])
+            ax.set_ylabel(ylabel, fontsize=FONT_SIZES["label"])
+            ax.tick_params(axis="y", labelsize=18)
         else:
             ax.tick_params(axis="y", labelleft=False)
 
@@ -276,10 +278,11 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
             _plot_bars(
                 ax,
                 metric_map,
-                ylabel=f"Lift at Top-{k_val}% Components",
-                ylim=(-1.0, 0.5),
+                ylabel="Lift",
+                ylim=(-1.0, 1.0),
                 show_ylabel=(idx % cols == 0),
                 show_xlabel=(idx // cols == rows - 1),
+                color_map=colors_lift,
             )
             ax.axhline(0.0, color="gray", linewidth=1, linestyle="--", alpha=0.7)
             ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
@@ -287,7 +290,9 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
         for k in range(len(tasks), rows * cols):
             fig.delaxes(axes[k // cols][k % cols])
 
-        handles = [Patch(facecolor=colors[p], edgecolor="black", label=str(p)) for p in ps_sorted]
+        fig.suptitle(f"Top-{k_val}% of Components", fontsize=FONT_SIZES["title"], fontweight="bold", y=1.02)
+
+        handles = [Patch(facecolor=colors_lift[p], edgecolor="black", label=str(p)) for p in ps_sorted]
         fig.legend(
             handles=handles,
             title="reuse@p",
@@ -324,21 +329,20 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
                 _plot_bars(
                     ax,
                     metric_map,
-                    ylabel=(
-                        f"% of Top-{k_val}% Components\nReused"
-                        if percent
-                        else f"Fraction of Top-{k_val}% Components\nReused"
-                    ),
+                    ylabel="Reuse (%)" if percent else "Reuse",
                     ylim=(0, 100 if percent else 1),
                     show_ylabel=(idx % cols == 0),
                     show_xlabel=(idx // cols == rows - 1),
+                    color_map=colors_reuse,
                 )
                 ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
 
             for k in range(len(tasks), rows * cols):
                 fig.delaxes(axes[k // cols][k % cols])
 
-            handles = [Patch(facecolor=colors[p], edgecolor="black", label=str(p)) for p in ps_sorted]
+            fig.suptitle(f"Top-{k_val}% of Components", fontsize=FONT_SIZES["title"], fontweight="bold", y=1.02)
+
+            handles = [Patch(facecolor=colors_reuse[p], edgecolor="black", label=str(p)) for p in ps_sorted]
             fig.legend(
                 handles=handles,
                 title="reuse@p",

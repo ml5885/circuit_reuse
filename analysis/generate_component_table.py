@@ -98,7 +98,7 @@ def main():
     p.add_argument("--k-percents", type=str, default="1,10,20,30")
     p.add_argument("--models", type=str, default=None)
     p.add_argument("--tasks", type=str, default=None)
-    p.add_argument("--exclude-tasks", type=str, default="mmlu")
+    p.add_argument("--exclude-tasks", type=str, default="")
     args = p.parse_args()
 
     cache_dir = Path(args.cache_dir)

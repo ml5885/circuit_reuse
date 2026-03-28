@@ -105,12 +105,13 @@ def main() -> None:
         for j, task in enumerate(tasks):
             ax = axes[i][j]
             digits_str = str(args.digits) if (task == "addition" and args.digits is not None) else "na"
-            attrib_name = (
+            attrib_pattern = (
                 f"{model.replace('/', '_')}__{hf_rev}__{task}__{args.method}__"
-                f"n{args.num_examples}__d{digits_str}.jsonl"
+                f"n{args.num_examples}__d{digits_str}*.jsonl"
             )
-            attrib_path = cache_dir / attrib_name
-            if attrib_path.exists():
+            matches = sorted(cache_dir.glob(attrib_pattern))
+            attrib_path = matches[0] if matches else cache_dir / attrib_pattern
+            if matches:
                 try:
                     scores = load_scores(attrib_path)
                     if scores:
