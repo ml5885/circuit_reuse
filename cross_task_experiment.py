@@ -174,8 +174,14 @@ def main():
     matrix_norm = {t: {} for t in tasks}       # drop / baseline (relative)
     matrix_ablated = {t: {} for t in tasks}    # ablated accuracy
     circuit_sizes = {}
+    skipped_tasks = set()
     for src_task in tasks:
-        metrics_path = find_metrics_file(results_dir, args.model_name, args.hf_revision, src_task)
+        try:
+            metrics_path = find_metrics_file(results_dir, args.model_name, args.hf_revision, src_task)
+        except FileNotFoundError:
+            print(f"[{src_task}] WARNING: no metrics found, skipping as source task")
+            skipped_tasks.add(src_task)
+            continue
         shared_components = load_shared_components(metrics_path, args.K, args.threshold)
         circuit_sizes[src_task] = len(shared_components)
         print(f"[{src_task}] Loaded {len(shared_components)} shared components")
@@ -190,23 +196,26 @@ def main():
             matrix_ablated[src_task][tgt_task] = acc * 100.0
             print(f"  -> {tgt_task}: baseline={baseline_acc[tgt_task]*100:.1f}% ablated={acc*100:.1f}% drop={drop*100:.1f}pp")
 
-    # Build CSV lines
+    # Build CSV lines (only for tasks that had metrics)
+    active_tasks = [t for t in tasks if t not in skipped_tasks]
     csv_lines = []
     header = ["source_task"] + tasks
     csv_lines.append(",".join(header))
-    for src_task in tasks:
+    for src_task in active_tasks:
         row = [src_task] + [f"{matrix_drop[src_task][t]:.3f}" for t in tasks]
         csv_lines.append(",".join(row))
     csv_text = "\n".join(csv_lines) + "\n"
 
     # Always print CSV to stdout
+    if skipped_tasks:
+        print(f"\n[WARNING] Skipped source tasks (no metrics): {', '.join(sorted(skipped_tasks))}")
     print("\n=== Accuracy Drop (percentage points) ===")
     print(csv_text)
 
     print("=== Relative Drop (% of baseline) ===")
     norm_header = ["source_task"] + tasks
     print(",".join(norm_header))
-    for src_task in tasks:
+    for src_task in active_tasks:
         row = [src_task] + [f"{matrix_norm[src_task][t]:.3f}" for t in tasks]
         print(",".join(row))
 
@@ -234,9 +243,10 @@ def main():
             "tasks": tasks,
             "baseline_accuracy": {t: baseline_acc[t] for t in tasks},
             "circuit_sizes": circuit_sizes,
-            "accuracy_drop_pp": {src: {tgt: matrix_drop[src][tgt] for tgt in tasks} for src in tasks},
-            "relative_drop_pct": {src: {tgt: matrix_norm[src][tgt] for tgt in tasks} for src in tasks},
-            "ablated_accuracy_pct": {src: {tgt: matrix_ablated[src][tgt] for tgt in tasks} for src in tasks},
+            "skipped_tasks": sorted(skipped_tasks),
+            "accuracy_drop_pp": {src: {tgt: matrix_drop[src][tgt] for tgt in tasks} for src in active_tasks},
+            "relative_drop_pct": {src: {tgt: matrix_norm[src][tgt] for tgt in tasks} for src in active_tasks},
+            "ablated_accuracy_pct": {src: {tgt: matrix_ablated[src][tgt] for tgt in tasks} for src in active_tasks},
         }
         json_path = out_dir / f"{prefix}.json"
         with json_path.open("w") as f:

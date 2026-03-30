@@ -1,4 +1,5 @@
 import argparse
+import sys
 import time
 import json
 import math
@@ -752,6 +753,7 @@ def main():
         print(f"[FATAL] {e}")
         import traceback
         traceback.print_exc()
+        sys.exit(1)
     finally:
         try:
             model.reset_hooks()
