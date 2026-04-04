@@ -24,6 +24,7 @@ from circuit_reuse.dataset import get_model_display_name, get_task_display_name
 
 matplotlib.use("Agg")
 matplotlib.rcParams["font.family"] = "serif"
+matplotlib.rcParams["font.size"] = 14
 
 CONDITIONS = ["shared_core", "residual_a", "residual_b", "random_control"]
 COND_DISPLAY = {
@@ -227,14 +228,14 @@ def _make_drop_bars(records, k_filter, min_size, all_models, output_dir,
             ax.bar(x - w / 2, target_means, w, color="#2a9d8f")
             ax.bar(x + w / 2, nontarget_means, w, color="#e76f51")
             ax.set_xticks(x)
-            ax.set_xticklabels([COND_DISPLAY[cond] for cond in CONDITIONS], fontsize=11, rotation=30, ha="right")
+            ax.set_xticklabels([COND_DISPLAY[cond] for cond in CONDITIONS], fontsize=12, rotation=30, ha="right")
             ax.set_title(get_task_display_name(task), fontsize=15)
             if c == 0:
                 ax.set_ylabel(ylabel)
 
             if not data[model][task]:
-                ax.text(0.5, 0.5, "No valid pairs", transform=ax.transAxes,
-                        ha="center", va="center", fontsize=15, color="gray")
+                ax.text(0.5, 0.5, "No valid circuits", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=15, color="0.6")
 
         for idx in range(n_tasks, nrows * ncols):
             r, c = divmod(idx, ncols)
@@ -252,8 +253,7 @@ def _make_drop_bars(records, k_filter, min_size, all_models, output_dir,
         ]
         fig.legend(handles=handles, loc="upper center", ncol=2, fontsize=11,
                    bbox_to_anchor=(0.5, 1.0), frameon=False)
-        fig.suptitle(f"{model_disp}: {title_suffix} (K={k_filter}%)", fontsize=15, y=1.03)
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        fig.tight_layout()
 
         model_dir = output_dir / model_slug
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -320,7 +320,7 @@ def plot_condition_target_vs_nontarget(records, k_filter, min_size, all_models, 
         ax.bar(x + w / 2, ntgt_means, w, color="#e76f51")
         ax.axhline(0, color="black", linewidth=0.5)
         ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
+        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=12, rotation=30, ha="right")
         ax.set_title(get_model_display_name(model), fontsize=15)
         if c == 0:
             ax.set_ylabel("Accuracy drop (pp)")
@@ -337,23 +337,15 @@ def plot_condition_target_vs_nontarget(records, k_filter, min_size, all_models, 
         plt.Rectangle((0, 0), 1, 1, fc="#2a9d8f", label="Target task"),
         plt.Rectangle((0, 0), 1, 1, fc="#e76f51", label="Non-target mean"),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=2, fontsize=11,
+    fig.legend(handles=handles, loc="upper center", ncol=2, fontsize=12,
                bbox_to_anchor=(0.5, 1.0), frameon=False)
     cond_name = COND_DISPLAY[condition]
-    fig.suptitle(f"{cond_name}: Target vs Non-Target Drop (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
 
     out = output_dir / f"{condition}_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"[SAVED] {out}")
-
-
-def plot_drop_diff(records, k_filter, min_size, all_models, output_dir):
-    conds = ["shared_core", "residual_a", "random_control"]
-    _make_diff_bars(records, k_filter, min_size, all_models, conds, COND_COLORS, COND_DISPLAY,
-                    "Selectivity", "drop_diff", output_dir)
-
 
 
 def _make_diff_bars(records, k_filter, min_size, all_models, conds, cond_colors,
@@ -418,7 +410,7 @@ def _make_diff_bars(records, k_filter, min_size, all_models, conds, cond_colors,
 
         ax.axhline(0, color="black", linewidth=0.5)
         ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
+        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=12, rotation=30, ha="right")
         ax.set_title(get_model_display_name(model), fontsize=15)
         if c == 0:
             ax.set_ylabel("Target − Non-Target Drop (pp)")
@@ -432,10 +424,9 @@ def _make_diff_bars(records, k_filter, min_size, all_models, conds, cond_colors,
         axes[r, c].set_visible(False)
 
     handles = [plt.Rectangle((0, 0), 1, 1, fc=cond_colors[c], label=cond_labels[c]) for c in conds]
-    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=11,
+    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=12,
                bbox_to_anchor=(0.5, 1.0), frameon=False)
-    fig.suptitle(f"{title} (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
 
     out = output_dir / f"{fname}_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -451,101 +442,8 @@ def plot_target_drop_diff(records, k_filter, min_size, all_models, cross_task, o
                     "Selectivity", "all_drop", output_dir, cross_task)
 
 
-def plot_drop_decomposition(records, k_filter, min_size, all_models, cross_task, output_dir):
-    """Per-model subplot: for each task, side-by-side bars showing full circuit drop
-    vs stacked shared-core + task-specific drops. Shows whether components' drops
-    account for the full circuit drop."""
-    filtered = filter_by_residual_size([r for r in records if r["K"] == k_filter], min_size)
-
-    # model -> task -> {"full": float, "shared": float, "specific": float}
-    data = defaultdict(lambda: defaultdict(lambda: {"full": [], "shared": [], "specific": []}))
-    all_tasks = set()
-
-    for r in filtered:
-        model, task_a = r["model_name"], r["task_a"]
-        if task_a in _EXCLUDE_TASKS:
-            continue
-        shared = compute_drops(r, "shared_core")
-        specific = compute_drops(r, "residual_a")
-        if shared and specific:
-            data[model][task_a]["shared"].append(shared["target_drop"])
-            data[model][task_a]["specific"].append(specific["target_drop"])
-            all_tasks.add(task_a)
-
-    # Full circuit from cross-task
-    for r in filtered:
-        model, task_a = r["model_name"], r["task_a"]
-        ct = cross_task.get((model, k_filter))
-        if not ct:
-            continue
-        drops = ct.get("accuracy_drop_pp", {})
-        if task_a in drops and task_a in drops[task_a]:
-            data[model][task_a]["full"].append(drops[task_a][task_a])
-
-    tasks = sorted(all_tasks)
-    bar_width = 0.35
-
-    # Warn about missing data
-    for model in all_models:
-        for task in sorted(all_tasks):
-            d = data[model][task]
-            missing = [k for k in ["full", "shared", "specific"] if not d[k]]
-            if missing and k_filter >= 10:
-                print(f"  [MISSING] drop_decomposition K={k_filter}% {model} / {task}: no data for {', '.join(missing)}")
-
-    n, nrows, ncols = _model_grid(all_models)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4.5 * nrows), sharey=True)
-    axes = np.atleast_2d(axes)
-
-    for idx, model in enumerate(all_models):
-        r, c = divmod(idx, ncols)
-        ax = axes[r, c]
-        x = np.arange(len(tasks))
-
-        full_vals, shared_vals, specific_vals = [], [], []
-        for task in tasks:
-            d = data[model][task]
-            full_vals.append(np.mean(d["full"]) if d["full"] else 0)
-            shared_vals.append(np.mean(d["shared"]) if d["shared"] else 0)
-            specific_vals.append(np.mean(d["specific"]) if d["specific"] else 0)
-
-        ax.bar(x - bar_width / 2, full_vals, bar_width * 0.9, color="#2ca02c", label="Full Circuit")
-        ax.bar(x + bar_width / 2, shared_vals, bar_width * 0.9, color=COND_COLORS["shared_core"],
-               label="Shared Core")
-        ax.bar(x + bar_width / 2, specific_vals, bar_width * 0.9, color=COND_COLORS["residual_a"],
-               bottom=shared_vals, label="Task-Specific")
-
-        ax.axhline(0, color="black", linewidth=0.5)
-        ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
-        ax.set_title(get_model_display_name(model), fontsize=15)
-        if c == 0:
-            ax.set_ylabel("Accuracy Drop (pp)")
-
-    for idx in range(n, nrows * ncols):
-        r, c = divmod(idx, ncols)
-        axes[r, c].set_visible(False)
-
-    handles = [
-        plt.Rectangle((0, 0), 1, 1, fc="#2ca02c", label="Full Circuit"),
-        plt.Rectangle((0, 0), 1, 1, fc=COND_COLORS["shared_core"], label="Shared Core"),
-        plt.Rectangle((0, 0), 1, 1, fc=COND_COLORS["residual_a"], label="Task-Specific"),
-    ]
-    fig.legend(handles=handles, loc="upper center", ncol=3, fontsize=11,
-               bbox_to_anchor=(0.5, 1.0), frameon=False)
-    fig.suptitle(f"Drop Decomposition (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-
-    out = output_dir / f"drop_decomposition_k{k_filter}.png"
-    fig.savefig(out, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print(f"[SAVED] {out}")
 
 
-def plot_residual_diff(records, k_filter, min_size, all_models, output_dir):
-    conds = ["residual_a", "residual_b", "random_control"]
-    _make_diff_bars(records, k_filter, min_size, all_models, conds, COND_COLORS, COND_DISPLAY,
-                    "Selectivity", "residual_diff", output_dir)
 
 
 def _plot_accuracy_bars(records, k_filter, min_size, all_models, cross_task, output_dir,
@@ -555,9 +453,9 @@ def _plot_accuracy_bars(records, k_filter, min_size, all_models, cross_task, out
     target = solid fill, non-target mean = crosshatched."""
     filtered = filter_by_residual_size([r for r in records if r["K"] == k_filter], min_size)
 
-    conds = ["full_circuit", "shared_core", "residual_a"]
-    colors = {"full_circuit": "#2ca02c", "shared_core": "#1f77b4", "residual_a": "#d62728"}
-    labels = {"full_circuit": "Full Circuit", "shared_core": "Shared Core", "residual_a": "Task-Specific"}
+    conds = ["full_circuit", "shared_core", "residual_a", "residual_b"]
+    colors = {"full_circuit": "#2ca02c", "shared_core": "#1f77b4", "residual_a": "#d62728", "residual_b": "#ff7f0e"}
+    labels = {"full_circuit": "Full Circuit", "shared_core": "Shared Core", "residual_a": "Task-Specific", "residual_b": "Task-Complement"}
 
     tgt_key = "target_rel" if relative else "target_drop"
     ntgt_key = "nontarget_rel" if relative else "nontarget_drop"
@@ -571,7 +469,7 @@ def _plot_accuracy_bars(records, k_filter, min_size, all_models, cross_task, out
         model, task_a = r["model_name"], r["task_a"]
         if task_a in _EXCLUDE_TASKS:
             continue
-        for cond in ["shared_core", "residual_a"]:
+        for cond in ["shared_core", "residual_a", "residual_b"]:
             d = compute_drops(r, cond)
             if d:
                 data[model][task_a].setdefault(cond, {"target": [], "nontarget": []})
@@ -599,53 +497,64 @@ def _plot_accuracy_bars(records, k_filter, min_size, all_models, cross_task, out
         data[model][task_a]["full_circuit"]["nontarget"].append(np.mean(others))
         all_tasks.add(task_a)
 
+    # Include all tasks from unfiltered records so tasks with empty sets still appear on x-axis
+    for r in records:
+        if r["K"] == k_filter and r["task_a"] not in _EXCLUDE_TASKS:
+            all_tasks.add(r["task_a"])
     tasks = sorted(all_tasks)
     n_conds = len(conds)
-    bar_width = 0.55 / (n_conds * 2)
+    bar_width = 0.75 / (n_conds * 2)
+
+    # Pre-compute which models have any real data (avoid defaultdict auto-creation)
+    models_with_data = {m for m in all_models if m in data and any(data[m][t] for t in tasks if t in data[m])}
 
     n, nrows, ncols = _model_grid(all_models)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4.5 * nrows), sharey=True)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 4.0 * nrows), sharey=True)
     axes = np.atleast_2d(axes)
 
     for idx, model in enumerate(all_models):
         r, c = divmod(idx, ncols)
         ax = axes[r, c]
         x = np.arange(len(tasks))
+        has_data = model in models_with_data
 
-        for i, cond in enumerate(conds):
-            base_offset = (i - n_conds / 2 + 0.5) * (bar_width * 2.2)
-            for j, (kind, hatch) in enumerate([("target", None), ("nontarget", "//")]):
-                vals = []
-                for task in tasks:
-                    d = data[model][task].get(cond)
-                    if d and d[kind]:
-                        vals.append(np.mean(d[kind]))
-                    else:
-                        vals.append(0)
-                offset = base_offset + (j - 0.5) * bar_width
-                ax.bar(x + offset, vals, bar_width * 0.9,
-                       color=colors[cond], hatch=hatch, edgecolor="white" if not hatch else colors[cond],
-                       alpha=1.0 if not hatch else 0.3, linewidth=0.5)
+        if has_data:
+            for i, cond in enumerate(conds):
+                base_offset = (i - n_conds / 2 + 0.5) * (bar_width * 2.2)
+                for j, (kind, hatch) in enumerate([("target", None), ("nontarget", "//")]):
+                    vals = []
+                    for task in tasks:
+                        d = data[model][task].get(cond)
+                        if d and d[kind]:
+                            vals.append(np.mean(d[kind]))
+                        else:
+                            vals.append(0)
+                    offset = base_offset + (j - 0.5) * bar_width
+                    ax.bar(x + offset, vals, bar_width * 0.9,
+                           color=colors[cond], hatch=hatch, edgecolor="white" if not hatch else colors[cond],
+                           alpha=1.0 if not hatch else 0.3, linewidth=0.5)
+        else:
+            ax.text(0.5, 0.5, "No valid circuits", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=15, color="0.6")
 
         ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
-        ax.set_title(get_model_display_name(model), fontsize=15)
-        if c == 0:
-            ax.set_ylabel("Relative Drop (%)" if relative else "Accuracy Drop (pp)")
+        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=13, rotation=30, ha="right")
+        ax.set_title(get_model_display_name(model), fontsize=19, pad=6)
+        ax.tick_params(labelsize=13)
 
     for idx in range(n, nrows * ncols):
         r, c = divmod(idx, ncols)
         axes[r, c].set_visible(False)
 
+    ylabel = "Relative Drop (%)" if relative else "Accuracy Drop (pp)"
     handles = [plt.Rectangle((0, 0), 1, 1, fc=colors[c], label=labels[c]) for c in conds]
     handles.append(plt.Rectangle((0, 0), 1, 1, fc="gray", label="Target"))
     handles.append(plt.Rectangle((0, 0), 1, 1, fc="gray", alpha=0.3, hatch="//",
                                  edgecolor="gray", label="Non-Target"))
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=11,
-               bbox_to_anchor=(0.5, 1.0), frameon=False)
-    suffix = "Relative" if relative else "Absolute"
-    fig.suptitle(f"{suffix} Accuracy Drop (K={k_filter}%)", fontsize=15, y=1.05)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout(rect=[0.03, 0, 1, 0.95])
+    fig.supylabel(ylabel, fontsize=19)
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=16,
+               bbox_to_anchor=(0.52, -0.06), frameon=True, fancybox=True)
 
     fname = "drop_relative" if relative else "drop_absolute"
     out = output_dir / f"{fname}_k{k_filter}.png"
@@ -702,7 +611,7 @@ def plot_selectivity_diff(records, k_filter, min_size, all_models, output_dir):
 
         ax.axhline(0, color="black", linewidth=0.5)
         ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
+        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=12, rotation=30, ha="right")
         ax.set_title(get_model_display_name(model), fontsize=15)
         if c == 0:
             ax.set_ylabel("Target − Non-Target Drop (pp)")
@@ -716,10 +625,9 @@ def plot_selectivity_diff(records, k_filter, min_size, all_models, output_dir):
         axes[r, c].set_visible(False)
 
     handles = [plt.Rectangle((0, 0), 1, 1, fc=COND_COLORS[c], label=COND_DISPLAY[c]) for c in CONDITIONS]
-    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=11,
+    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=12,
                bbox_to_anchor=(0.5, 1.0), frameon=False)
-    fig.suptitle(f"Selectivity: Target − Non-Target Drop (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
 
     out = output_dir / f"selectivity_diff_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -771,7 +679,7 @@ def plot_shared_vs_specific(records, k_filter, min_size, all_models, output_dir)
 
         ax.axhline(0, color="black", linewidth=0.5)
         ax.set_xticks(x)
-        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=11, rotation=30, ha="right")
+        ax.set_xticklabels([get_task_display_name(t) for t in tasks], fontsize=12, rotation=30, ha="right")
         ax.set_title(get_model_display_name(model), fontsize=15)
         if c == 0:
             ax.set_ylabel("Target − Non-Target Drop (pp)")
@@ -785,10 +693,9 @@ def plot_shared_vs_specific(records, k_filter, min_size, all_models, output_dir)
         axes[r, c].set_visible(False)
 
     handles = [plt.Rectangle((0, 0), 1, 1, fc=COMPARE_COLORS[c], label=COND_DISPLAY[c]) for c in COMPARE_CONDS]
-    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=11,
+    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=12,
                bbox_to_anchor=(0.5, 1.0), frameon=False)
-    fig.suptitle(f"Shared Core vs Task-Specific Selectivity (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
 
     out = output_dir / f"shared_vs_specific_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -871,8 +778,8 @@ def plot_target_drop_over_k(records, k_values, min_size, all_models, output_dir)
             ax.set_xticklabels([f"{k}%" for k in k_values], fontsize=11)
 
             if not has_data:
-                ax.text(0.5, 0.5, "No valid pairs", transform=ax.transAxes,
-                        ha="center", va="center", fontsize=15, color="gray")
+                ax.text(0.5, 0.5, "No valid circuits", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=15, color="0.6")
 
         for idx in range(n_tasks, nrows * ncols):
             r, c = divmod(idx, ncols)
@@ -882,8 +789,7 @@ def plot_target_drop_over_k(records, k_values, min_size, all_models, output_dir)
                    linewidth=1.5, label=COND_DISPLAY[c]) for c in OVER_K_CONDITIONS]
         fig.legend(handles=handles, loc="upper center", ncol=len(OVER_K_CONDITIONS), fontsize=11,
                    bbox_to_anchor=(0.5, 1.0), frameon=False)
-        fig.suptitle(f"{model_disp}: Target Task Drop over K", fontsize=15, y=1.04)
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        fig.tight_layout()
 
         out = output_dir / f"target_drop_over_k_{model_slug}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -935,7 +841,7 @@ def plot_selectivity_bars(records, k_filter, min_size, all_models, output_dir):
         ax.axhline(y=1, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
         ax.set_xticks(x)
         ax.set_xticklabels([get_model_display_name(m) for m in all_models],
-                           fontsize=11, rotation=30, ha="right")
+                           fontsize=12, rotation=30, ha="right")
         ax.set_title(get_task_display_name(task), fontsize=15)
         if c == 0:
             ax.set_ylabel("Selectivity")
@@ -949,10 +855,9 @@ def plot_selectivity_bars(records, k_filter, min_size, all_models, output_dir):
         axes[r, c].set_visible(False)
 
     handles = [plt.Rectangle((0, 0), 1, 1, fc=COND_COLORS[c], label=COND_DISPLAY[c]) for c in CONDITIONS]
-    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=11,
+    fig.legend(handles=handles, loc="upper center", ncol=n_conds, fontsize=12,
                bbox_to_anchor=(0.5, 1.0), frameon=False)
-    fig.suptitle(f"Selectivity by Task (K={k_filter}%)", fontsize=15, y=1.03)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
 
     out = output_dir / f"selectivity_bars_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -1029,8 +934,7 @@ def plot_circuit_decomposition(records, k_filter, all_models, output_dir):
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=12,
                bbox_to_anchor=(0.5, -0.06))
-    fig.suptitle(f"Circuit Decomposition Sizes (K={k_filter}%)", fontsize=18, fontweight="bold")
-    fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+    fig.tight_layout(rect=[0, 0.02, 1, 1.0])
 
     out = output_dir / f"circuit_decomposition_k{k_filter}.png"
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -1097,9 +1001,7 @@ def plot_circuit_decomposition_over_k(records, k_values, all_models, output_dir)
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=12,
                    bbox_to_anchor=(0.5, -0.06))
-        fig.suptitle(f"{model_disp}: Circuit Decomposition over K",
-                     fontsize=18, fontweight="bold")
-        fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+        fig.tight_layout(rect=[0, 0.02, 1, 1.0])
 
         safe = model.replace("/", "_")
         out = output_dir / f"circuit_decomposition_over_k_{safe}.png"
@@ -1143,7 +1045,7 @@ def main():
     p.add_argument("--output-dir", type=str, default="results2/selective_ablation")
     p.add_argument("--k-values", type=str, default="1,5,10,20,30")
     p.add_argument("--min-residual-size", type=int, default=2)
-    p.add_argument("--exclude-tasks", type=str, default="arc_easy",
+    p.add_argument("--exclude-tasks", type=str, default="mmlu",
                     help="Comma-separated tasks to exclude from analysis.")
     args = p.parse_args()
 
@@ -1175,7 +1077,7 @@ def main():
         "residual_a": "task_specific",
         "residual_b": "task_complement",
     }
-    for name in ["drop_diff", "all_drop", "residual_diff", "raw_accuracy", "raw_accuracy_relative", "drop_decomposition", "circuit_decomposition"] + list(per_cond_folders.values()):
+    for name in ["all_drop", "raw_accuracy", "raw_accuracy_relative", "circuit_decomposition"] + list(per_cond_folders.values()):
         dirs[name] = output_dir / name
         dirs[name].mkdir(parents=True, exist_ok=True)
 
@@ -1186,10 +1088,7 @@ def main():
         if not any(r["K"] == k for r in records):
             continue
 
-        plot_drop_diff(records, k, min_size, all_models, dirs["drop_diff"])
         plot_target_drop_diff(records, k, min_size, all_models, cross_task, dirs["all_drop"])
-        plot_residual_diff(records, k, min_size, all_models, dirs["residual_diff"])
-        plot_drop_decomposition(records, k, min_size, all_models, cross_task, dirs["drop_decomposition"])
         plot_raw_accuracy(records, k, min_size, all_models, cross_task, dirs["raw_accuracy"])
         plot_raw_accuracy_relative(records, k, min_size, all_models, cross_task, dirs["raw_accuracy_relative"])
         plot_circuit_decomposition(records, k, all_models, dirs["circuit_decomposition"])

@@ -300,6 +300,122 @@ def plot_multitask(
     print(f"[SAVED] {out}")
 
 
+def plot_per_task_combined(
+    by_task: dict[str, dict[str, tuple[np.ndarray, list[str]]]],
+    k_percents: list[float],
+    output_dir: Path,
+):
+    """For each task: 2 models per row, each model gets [MLP | Heads] side by side."""
+    cmap = LinearSegmentedColormap.from_list("circuit", ["#f7f7f7", "#2166ac"], N=256)
+
+    for task, model_data in sorted(by_task.items()):
+        task_disp = get_task_display_name(task)
+        models = sorted(model_data.keys())
+        n_models = len(models)
+        if n_models == 0:
+            continue
+
+        models_per_row = 2
+        n_rows = math.ceil(n_models / models_per_row)
+
+        # Group models into rows and compute max layers per row for height
+        row_groups: list[list[str]] = []
+        for i in range(0, n_models, models_per_row):
+            row_groups.append(models[i:i + models_per_row])
+
+        row_heights = []
+        for group in row_groups:
+            max_layers = max(
+                sum(1 for l in model_data[m][1] if "MLP" in l) for m in group
+            )
+            row_heights.append(max(2.2, max_layers * 0.10))
+
+        # Columns: [MLP1, Heads1, gap, MLP2, Heads2, colorbar]
+        fig_w = 18
+        fig_h = sum(row_heights) + 1.5
+
+        fig = plt.figure(figsize=(fig_w, fig_h))
+        # 6 columns: MLP_L, Head_L, MLP_R, Head_R, cbar
+        gs = fig.add_gridspec(
+            n_rows, 5,
+            width_ratios=[1, 1.8, 1, 1.8, 0.06],
+            height_ratios=row_heights,
+            wspace=0.20, hspace=0.35,
+        )
+
+        im = None
+        for row_idx, group in enumerate(row_groups):
+            is_bottom = row_idx == n_rows - 1
+            for col_idx, model_name in enumerate(group):
+                freq, labels = model_data[model_name]
+                freq_m, freq_h, n_mlp, n_head, n_hpl = _split_mlp_head(freq, labels)
+                model_disp = get_model_display_name(model_name)
+                n_layers = n_mlp
+                col_off = col_idx * 2  # 0 or 2
+
+                # MLP panel
+                ax_mlp = fig.add_subplot(gs[row_idx, col_off])
+                ax_mlp.imshow(freq_m, aspect="auto", cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
+                ax_mlp.set_yticks(range(n_mlp))
+                ax_mlp.set_yticklabels(list(range(n_mlp - 1, -1, -1)),
+                                       fontsize=max(4, min(7, 180 / n_mlp)))
+                ax_mlp.set_ylabel(model_disp, fontsize=11, fontweight="bold")
+                ax_mlp.set_xticks(range(len(k_percents)))
+                if is_bottom:
+                    ax_mlp.set_xticklabels([f"{k:g}%" for k in k_percents],
+                                           fontsize=8, rotation=45, ha="right")
+                else:
+                    ax_mlp.set_xticklabels([])
+                if row_idx == 0:
+                    ax_mlp.set_title("MLP", fontsize=12)
+
+                # Heads panel
+                ax_head = fig.add_subplot(gs[row_idx, col_off + 1])
+                im = ax_head.imshow(freq_h, aspect="auto", cmap=cmap, vmin=0, vmax=1,
+                                    interpolation="nearest")
+                ax_head.set_xticks(range(len(k_percents)))
+                if is_bottom:
+                    ax_head.set_xticklabels([f"{k:g}%" for k in k_percents],
+                                           fontsize=8, rotation=45, ha="right")
+                else:
+                    ax_head.set_xticklabels([])
+
+                tick_positions = []
+                tick_labels_y = []
+                for layer in range(n_layers):
+                    row_start = layer * n_hpl
+                    mid = row_start + (n_hpl - 1) / 2
+                    tick_positions.append(mid)
+                    tick_labels_y.append(str(n_layers - 1 - layer))
+                    if layer > 0:
+                        ax_head.axhline(y=row_start - 0.5, color="gray",
+                                        linewidth=0.3, alpha=0.5)
+                ax_head.set_yticks(tick_positions)
+                ax_head.set_yticklabels(tick_labels_y,
+                                        fontsize=max(4, min(7, 180 / n_layers)))
+                if row_idx == 0:
+                    ax_head.set_title("Heads", fontsize=12)
+
+            # Hide unused columns if odd number of models in last row
+            if len(group) < models_per_row:
+                for empty_col in range(len(group) * 2, models_per_row * 2):
+                    ax_empty = fig.add_subplot(gs[row_idx, empty_col])
+                    ax_empty.set_visible(False)
+
+        # Colorbar
+        ax_cbar = fig.add_subplot(gs[:, 4])
+        cbar = fig.colorbar(im, cax=ax_cbar)
+        cbar.set_label("Fraction of examples", fontsize=10)
+        cbar.ax.tick_params(labelsize=7)
+
+        fig.suptitle(task_disp, fontsize=16, y=1.01)
+        out_path = output_dir / "per_task" / f"{task}.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[SAVED] {out_path}")
+
+
 def find_attribution_files(cache_dir: Path) -> list[Path]:
     return sorted(cache_dir.glob("*.jsonl"))
 
@@ -377,6 +493,13 @@ def main():
     for model_name, all_data in by_model.items():
         if len(all_data) >= 2:
             plot_multitask(all_data, k_percents, model_name, output_dir)
+
+    # Third pass: per-task combined plots (rows=models, cols=[MLP, Heads])
+    by_task: dict[str, dict[str, tuple[np.ndarray, list[str]]]] = {}
+    for model_name, task_data in by_model.items():
+        for task, data in task_data.items():
+            by_task.setdefault(task, {})[model_name] = data
+    plot_per_task_combined(by_task, k_percents, output_dir)
 
 
 if __name__ == "__main__":

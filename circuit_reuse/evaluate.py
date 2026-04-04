@@ -31,6 +31,51 @@ def _extract_gold_ids(model: Any, prompt: str, target: str, device, verbose: boo
     return [int(x) for x in gold_ids]
 
 
+def _greedy_generate(model: Any, prompt_tokens: torch.Tensor, max_new_tokens: int) -> List[int]:
+    """Autoregressively generate tokens via greedy decoding."""
+    generated: List[int] = []
+    tokens = prompt_tokens
+    for _ in range(max_new_tokens):
+        logits = model(tokens)
+        next_id = int(logits[0, -1].argmax().item())
+        generated.append(next_id)
+        tokens = torch.cat([tokens, torch.tensor([[next_id]], device=tokens.device)], dim=1)
+    return generated
+
+
+def _get_tokenizer(model: Any):
+    """Extract the tokenizer from a model (TransformerLens or HFHookedOLMo)."""
+    if hasattr(model, "tokenizer"):
+        return model.tokenizer
+    if hasattr(model, "tokenizerWrapper"):
+        return model.tokenizerWrapper
+    return None
+
+
+def _check_addition_correct(model: Any, prompt: str, target: str, device: str,
+                            logits_last: torch.Tensor, verbose: bool = False) -> bool:
+    """Check addition correctness using autoregressive decoding for multi-token targets."""
+    gold_ids = _extract_gold_ids(model, prompt, target, device=device, verbose=verbose)
+    n_target_tokens = len(gold_ids)
+
+    if n_target_tokens <= 1:
+        pred_id = int(logits_last.argmax().item())
+        return bool(gold_ids and pred_id == gold_ids[0])
+
+    # Multi-token target: do greedy autoregressive decoding
+    prompt_tokens = model.to_tokens(prompt, prepend_bos=True).to(device)
+    generated = _greedy_generate(model, prompt_tokens, n_target_tokens)
+
+    if verbose:
+        tokenizer = _get_tokenizer(model)
+        if tokenizer:
+            pred_str = tokenizer.decode(generated, skip_special_tokens=True)
+            print(f"[ADD] target='{target}' gold_ids={gold_ids} gen={generated} "
+                  f"pred_str='{pred_str}' match={generated == gold_ids}")
+
+    return generated == gold_ids
+
+
 _BOOL_CACHE = {}
 
 
@@ -118,9 +163,7 @@ def evaluate_accuracy(model: Any, dataset: Iterable[Example], task: str, verbose
                     correct += 1
 
             else:
-                gold_ids = _extract_gold_ids(model, prompt, target, device=device, verbose=verbose)
-                pred_id = int(logits_last.argmax().item())
-                if gold_ids and pred_id == gold_ids[0]:
+                if _check_addition_correct(model, prompt, target, device, logits_last, verbose=verbose):
                     correct += 1
 
             total += 1
@@ -175,9 +218,7 @@ def evaluate_accuracy_with_ablation(
                     correct += 1
 
             else:
-                gold_ids = _extract_gold_ids(model, ex.prompt, ex.target, device=device, verbose=verbose)
-                pred_id = int(logits_last.argmax().item())
-                if gold_ids and pred_id == gold_ids[0]:
+                if _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose):
                     correct += 1
 
             total += 1
@@ -253,10 +294,8 @@ def evaluate_predictions(
                     per_ex.append({"prompt": ex.prompt, "target": gold, "pred": pred_label, "is_correct": bool(ok)})
 
                 else:
-                    gold_ids = _extract_gold_ids(model, ex.prompt, ex.target, device=device, verbose=verbose)
-                    pred_id = int(logits_last.argmax().item())
-                    ok = (gold_ids and pred_id == gold_ids[0])
-                    per_ex.append({"prompt": ex.prompt, "target": ex.target, "pred_token_id": pred_id, "is_correct": bool(ok)})
+                    ok = _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose)
+                    per_ex.append({"prompt": ex.prompt, "target": ex.target, "is_correct": bool(ok)})
 
                 correct += int(per_ex[-1]["is_correct"])
                 total += 1

@@ -324,7 +324,7 @@ DATASET_DISPLAY_NAMES: dict[str, str] = {
     "boolean": "Boolean",
     "mmlu": "MMLU",
     "ioi": "IOI",
-    "mcqa": "Colored Objects MCQA",
+    "mcqa": "CopyColors MCQA",
     "arc_easy": "ARC (Easy)",
     "arc_challenge": "ARC (Challenge)",
 }

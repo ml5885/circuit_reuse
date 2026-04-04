@@ -268,7 +268,7 @@ def plot_heatmaps_multiplot(data, metric, metric_label, out_dir):
                 source_label=source_label,
             )
 
-            ax.set_title(model_label, fontsize=16, pad=10)
+            ax.set_title(model_label, fontsize=15, pad=4)
             ax.set_xlabel("")
             ax.set_ylabel("")
             ax.tick_params(axis="both", which="major", labelsize=12)
@@ -286,7 +286,7 @@ def plot_heatmaps_multiplot(data, metric, metric_label, out_dir):
         for j in range(len(chunk), len(axes_flat)):
             axes_flat[j].set_visible(False)
 
-        fig.subplots_adjust(left=0.14, right=0.86, bottom=0.20, top=0.92, wspace=0.10, hspace=0.18)
+        fig.subplots_adjust(left=0.14, right=0.86, bottom=0.20, top=0.96, wspace=0.10, hspace=0.18)
         fig.supxlabel("Target task", fontsize=14, y=0.04)
         any_k = _format_topk_suffix(chunk[0]) if chunk else ""
         fig.supylabel(
@@ -298,8 +298,8 @@ def plot_heatmaps_multiplot(data, metric, metric_label, out_dir):
         if im is not None:
             cax = fig.add_axes([0.885, 0.22, 0.02, 0.58])
             cb = fig.colorbar(im, cax=cax)
-            cb.set_label(metric_label, fontsize=12)
-            cb.ax.tick_params(labelsize=11)
+            cb.set_label(metric_label, fontsize=13)
+            cb.ax.tick_params(labelsize=12)
 
         k_suffix = _multiplot_k_filename_suffix(chunk)
         suffix = "" if len(data) <= chunk_size else f"_part{chunk_idx // chunk_size + 1}"
@@ -307,7 +307,7 @@ def plot_heatmaps_multiplot(data, metric, metric_label, out_dir):
         fig.savefig(path, bbox_inches="tight", dpi=300)
         print(f"Saved {path}")
         plt.close(fig)
-        
+
 
 def plot_diagonal_vs_offdiag(data, out_dir):
     def safe_model_tag(model_name):
@@ -331,8 +331,8 @@ def plot_diagonal_vs_offdiag(data, out_dir):
 
         x = np.arange(len(tasks))
         w = 0.35
-        ax.bar(x - w / 2, diag, w, label="Own circuit", color="#4c78a8", edgecolor="none")
-        ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#9ecae9", edgecolor="none")
+        ax.bar(x - w / 2, diag, w, label="Own circuit", color="#6A0572", edgecolor="none")
+        ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
         k_suffix = _format_topk_suffix(d)
@@ -342,7 +342,7 @@ def plot_diagonal_vs_offdiag(data, out_dir):
         ax.grid(False)
         ax.grid(True, axis="y", which="major", linewidth=0.7, alpha=0.4)
         ax.grid(False, axis="x", which="both")
-        ax.legend(fontsize=9, loc="upper center", bbox_to_anchor=(0.5, 1.10), ncol=2, frameon=False)
+        ax.legend(fontsize=9, loc="upper center", bbox_to_anchor=(0.5, 1.10), ncol=2, frameon=True, edgecolor="grey", facecolor="white", fancybox=True)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
@@ -366,8 +366,10 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
     chunk_size = 6
     for chunk_idx in range(0, len(data), chunk_size):
         chunk = data[chunk_idx : chunk_idx + chunk_size]
-        fig, axes = plt.subplots(2, 3, figsize=(14, 8), squeeze=False, sharey=True)
+        fig, axes = plt.subplots(2, 3, figsize=(14, 5.5), squeeze=False, sharey=True)
         axes_flat = axes.flatten()
+
+        k_val = chunk[0].get("_topk") or chunk[0].get("K") or ""
 
         for i, d in enumerate(chunk):
             ax = axes_flat[i]
@@ -383,45 +385,46 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
 
             x = np.arange(len(tasks))
             w = 0.35
-            ax.bar(x - w / 2, diag, w, label="Own circuit", color="#4c78a8", edgecolor="none")
-            ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#9ecae9", edgecolor="none")
+            ax.bar(x - w / 2, diag, w, label="Own circuit", color="#6A0572", edgecolor="none")
+            ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
-            ax.set_title(_format_model_title(d), fontsize=10)
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=13)
+            ax.set_title(_format_model_title(d), fontsize=18, pad=4)
             ax.axhline(0, color="black", linewidth=0.6, alpha=0.6)
             ax.grid(False)
             ax.grid(True, axis="y", which="major", linewidth=0.6, alpha=0.3)
             ax.grid(False, axis="x", which="both")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
+            ax.tick_params(labelsize=13)
 
             row, col = divmod(i, 3)
             if row == 0:
                 ax.set_xlabel("")
                 ax.tick_params(labelbottom=False)
-            if col != 0:
-                ax.set_ylabel("")
-                ax.tick_params(labelleft=False)
-            else:
-                k_suffix = _format_topk_suffix(d)
-                ax.set_ylabel("Accuracy drop (pp)" + (f"  {k_suffix}" if k_suffix else ""))
 
         for j in range(len(chunk), len(axes_flat)):
             axes_flat[j].set_visible(False)
+
+        fig.supylabel(f"Accuracy Drop (pp)  K={k_val}%", fontsize=19, x=0.06, y=0.55)
 
         handles, labels = axes_flat[0].get_legend_handles_labels() if chunk else ([], [])
         if handles:
             fig.legend(
                 handles,
                 labels,
-                fontsize=10,
-                loc="upper center",
-                bbox_to_anchor=(0.5, 0.98),
+                fontsize=17,
+                loc="lower center",
+                bbox_to_anchor=(0.5, -0.06),
                 ncol=2,
-                frameon=False,
+                frameon=True,
+                edgecolor="grey",
+                facecolor="white",
+                fancybox=True,
+                borderpad=0.4,
             )
         fig.suptitle("")
-        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        fig.tight_layout(rect=[0.04, 0, 1, 1.0])
 
         k_suffix = _multiplot_k_filename_suffix(chunk)
         suffix = "" if len(data) <= chunk_size else f"_part{chunk_idx // chunk_size + 1}"
@@ -543,7 +546,7 @@ def plot_normalized_heatmaps_multiplot(data, out_dir):
                 source_label=source_label,
             )
 
-            ax.set_title(_format_model_title(d), fontsize=16, pad=10)
+            ax.set_title(_format_model_title(d), fontsize=15, pad=4)
             ax.set_xlabel("")
             ax.set_ylabel("")
             ax.tick_params(axis="both", which="major", labelsize=12)
@@ -564,10 +567,10 @@ def plot_normalized_heatmaps_multiplot(data, out_dir):
         if im is not None:
             cax = fig.add_axes([0.885, 0.22, 0.02, 0.58])
             cb = fig.colorbar(im, cax=cax)
-            cb.set_label("Drop relative to own-circuit drop", fontsize=12)
-            cb.ax.tick_params(labelsize=11)
+            cb.set_label("Drop relative to own-circuit drop", fontsize=13)
+            cb.ax.tick_params(labelsize=12)
 
-        fig.subplots_adjust(left=0.14, right=0.86, bottom=0.20, top=0.92, wspace=0.10, hspace=0.18)
+        fig.subplots_adjust(left=0.14, right=0.86, bottom=0.20, top=0.96, wspace=0.10, hspace=0.18)
         fig.supxlabel("Target task", fontsize=14, y=0.04)
         any_k = _format_topk_suffix(chunk[0]) if chunk else ""
         fig.supylabel(
@@ -657,8 +660,8 @@ def plot_specificity_summary_multiplot(data, out_dir):
             x = np.arange(len(tasks))
             ax.bar(x, ratios, width=0.6, color="#4c78a8", edgecolor="none")
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=10)
-            ax.set_title(_format_model_title(d), fontsize=10)
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=12)
+            ax.set_title(_format_model_title(d), fontsize=15, pad=4)
             ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
@@ -687,6 +690,72 @@ def plot_specificity_summary_multiplot(data, out_dir):
         fig.savefig(path, bbox_inches="tight", dpi=300)
         print(f"Saved {path}")
         plt.close(fig)
+
+
+def export_diagonal_vs_offdiag_latex(data, out_dir):
+    """Export a LaTeX table of own-circuit vs other-circuits accuracy drops."""
+    if not out_dir:
+        return
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Group by K
+    by_k = {}
+    for d in data:
+        k = d.get("_topk") or d.get("K")
+        by_k.setdefault(k, []).append(d)
+
+    for k, entries in sorted(by_k.items()):
+        # Collect all tasks from first entry
+        tasks = entries[0]["tasks"]
+        task_labels = [get_task_display_name(t) for t in tasks]
+        n_tasks = len(tasks)
+
+        col_spec = "l" + "r@{\\,/\\,}r" * n_tasks
+        lines = [
+            f"% Auto-generated: diagonal vs off-diagonal drops at K={k}%",
+            "\\begin{table}[t]",
+            "\\centering",
+            "\\small",
+            f"\\begin{{tabular}}{{{col_spec}}}",
+            "\\toprule",
+        ]
+        # Header row
+        header_parts = ["Model"]
+        for tl in task_labels:
+            header_parts.append(f"\\multicolumn{{2}}{{c}}{{{tl}}}")
+        lines.append(" & ".join(header_parts) + " \\\\")
+        # Sub-header
+        sub = [""]
+        for _ in tasks:
+            sub.append("Own")
+            sub.append("Other")
+        lines.append(" & ".join(sub) + " \\\\")
+        lines.append("\\midrule")
+
+        for d in entries:
+            model = get_model_display_name(d["model_name"])
+            drop = d["accuracy_drop_pp"]
+            row = [model]
+            for t in tasks:
+                diag = drop[t][t]
+                offdiag_vals = [drop[src][t] for src in tasks if src != t]
+                offdiag = np.mean(offdiag_vals)
+                row.append(f"{diag:.0f}")
+                row.append(f"{offdiag:.0f}")
+            lines.append(" & ".join(row) + " \\\\")
+
+        lines.append("\\bottomrule")
+        lines.append("\\end{tabular}")
+        lines.append(f"\\caption{{\\textbf{{Own-circuit vs.\\ other-circuits accuracy drop (pp) at $K$={k}\\%.}} "
+                     f"For each task, we compare the drop from ablating that task's own circuit against the mean drop "
+                     f"from ablating other tasks' circuits. Similar values indicate low task-specificity.}}")
+        lines.append(f"\\label{{tab:diagonal_vs_offdiag}}")
+        lines.append("\\end{table}")
+
+        path = out_dir / f"diagonal_vs_offdiag_K{k}.tex"
+        path.write_text("\n".join(lines) + "\n")
+        print(f"[SAVED] {path}")
 
 
 def parse_args():
@@ -723,11 +792,12 @@ def main():
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "axes.titlesize": 12,
-            "axes.labelsize": 12,
-            "xtick.labelsize": 10,
-            "ytick.labelsize": 10,
-            "legend.fontsize": 10,
+            "font.size": 14,
+            "axes.titlesize": 15,
+            "axes.labelsize": 14,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            "legend.fontsize": 12,
         }
     )
     args = parse_args()
@@ -779,6 +849,7 @@ def main():
         plot_diagonal_vs_offdiag_multiplot(data, multiplots_dir)
         plot_normalized_heatmaps_multiplot(data, multiplots_dir)
         plot_specificity_summary_multiplot(data, multiplots_dir)
+        export_diagonal_vs_offdiag_latex(data, multiplots_dir / "diagonal_vs_offdiag")
 
 
 if __name__ == "__main__":

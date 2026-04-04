@@ -17,7 +17,7 @@ from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
 METHOD_DISPLAY = {"eap": "EAP", "gradient": "Gradient"}
 
-SKIP_TASKS = ["arc_easy"]
+SKIP_TASKS = ["arc_easy", "mmlu"]
 
 def _extract_step_from_revision(rev: str) -> Optional[int]:
     m = re.search(r"(?:^|[-_])step(\d+)(?:$|[-_])", str(rev) if rev is not None else "")
@@ -249,7 +249,7 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, show: boo
                 show_xlabel=(idx // cols == rows - 1),
             )
             ax.axhline(0.05, color="red", linewidth=1.5, linestyle="--", alpha=0.9)
-            ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
+            ax.set_title(task, fontsize=FONT_SIZES["title"], pad=4)
 
         for k in range(len(tasks), rows * cols):
             fig.delaxes(axes[k // cols][k % cols])

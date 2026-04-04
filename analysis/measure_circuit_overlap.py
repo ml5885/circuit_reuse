@@ -10,6 +10,7 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg")
+plt.rcParams.update({"font.family": "serif", "font.size": 14})
 
 TASK_DISPLAY = {
     "addition": "Addition",
@@ -17,13 +18,13 @@ TASK_DISPLAY = {
     "arc_easy": "ARC (Easy)",
     "boolean": "Boolean",
     "ioi": "IOI",
-    "mcqa": "Colored Objects MCQA",
+    "mcqa": "CopyColors MCQA",
     "mmlu": "MMLU",
 }
 
 MODEL_DISPLAY = {
-    "google/gemma-2-2b-it": "Google/Gemma 2 2B IT",
-    "google/gemma-2-2b": "Google/Gemma 2 2B",
+    "google/gemma-2-2b-it": "Gemma 2 2B Instruct",
+    "google/gemma-2-2b": "Gemma 2 2B",
     "meta-llama/Llama-3.2-3B-Instruct": "Llama-3.2-3B Instruct",
     "meta-llama/Llama-3.2-3B": "Llama-3.2-3B",
     "qwen3-4b": "Qwen3-4B",
@@ -123,8 +124,8 @@ def plot_heatmap(
     ax.set_xticks(range(len(df.columns)))
     ax.set_yticks(range(len(df.index)))
 
-    ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=9)
-    ax.set_yticklabels(df.index, fontsize=9)
+    ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=12)
+    ax.set_yticklabels(df.index, fontsize=12)
 
     for i in range(len(df.index)):
         for j in range(len(df.columns)):
@@ -144,10 +145,10 @@ def plot_heatmap(
                 color="white" if v > (vmax - vmin) * 0.65 + vmin else "black",
             )
 
-    ax.set_title(title, fontsize=12, pad=10, loc="center")
+    ax.set_title(title, fontsize=15, pad=4, loc="center")
 
-    ax.set_xlabel("Task B", fontsize=10)
-    ax.set_ylabel("Task A", fontsize=10)
+    ax.set_xlabel("Task B", fontsize=14)
+    ax.set_ylabel("Task A", fontsize=14)
 
     fig.colorbar(im, ax=ax, shrink=0.8)
 
@@ -179,8 +180,8 @@ def plot_multimodel_heatmap(
     fig, axes = plt.subplots(
         nrows,
         ncols,
-        figsize=(6 * ncols + 1.5, 5.5 * nrows),
-        gridspec_kw={"wspace": 0.15, "hspace": 0.25},
+        figsize=(6 * ncols + 1.5, 4.5 * nrows),
+        gridspec_kw={"wspace": 0.15, "hspace": 0.12},
         squeeze=False,
     )
 
@@ -200,12 +201,12 @@ def plot_multimodel_heatmap(
         is_bottom = (row == nrows - 1) or (idx + ncols >= n)
 
         if is_bottom:
-            ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=10)
+            ax.set_xticklabels(df.columns, rotation=45, ha="right", fontsize=13)
         else:
             ax.set_xticklabels([])
 
         if col == 0:
-            ax.set_yticklabels(df.index, fontsize=10)
+            ax.set_yticklabels(df.index, fontsize=13)
         else:
             ax.set_yticklabels([])
 
@@ -223,15 +224,14 @@ def plot_multimodel_heatmap(
                     f"{v:{fmt}}",
                     ha="center",
                     va="center",
-                    fontsize=9,
+                    fontsize=12,
                     color="white" if v > (vmax - vmin) * 0.65 + vmin else "black",
                 )
 
         ax.set_title(
             MODEL_DISPLAY.get(model, model),
-            fontsize=13,
-            fontweight="bold",
-            pad=8,
+            fontsize=17,
+            pad=6,
             loc="center",
         )
 
@@ -242,14 +242,6 @@ def plot_multimodel_heatmap(
 
     suffix = f" (K={K}%)" if K is not None else ""
 
-    fig.suptitle(
-        f"Circuit Overlap — {metric_title}{suffix}",
-        fontsize=15,
-        fontweight="bold",
-        y=0.98,
-        ha="center",
-    )
-
     cbar = fig.colorbar(
         im,
         ax=axes.ravel().tolist(),
@@ -259,7 +251,8 @@ def plot_multimodel_heatmap(
         label=metric_title,
     )
 
-    cbar.ax.tick_params(labelsize=9)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.set_label(metric_title, fontsize=14)
 
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
 
@@ -356,12 +349,12 @@ def plot_circuit_sizes_multi_k(
         df.columns = [TASK_DISPLAY.get(c, c) for c in df.columns]
         df.plot.bar(ax=ax, rot=30, legend=False)
         ax.set_ylabel("Number of Components")
-        ax.set_title(f"K={K}%", fontweight="bold")
+        ax.set_title(f"K={K}%")
     for idx in range(len(k_values), nrows * ncols):
         axes[idx // ncols][idx % ncols].set_visible(False)
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, bbox_to_anchor=(1.02, 0.5), loc="center left", fontsize=8)
-    fig.suptitle("Shared Circuit Sizes", fontsize=14, fontweight="bold", y=1.0)
+    fig.suptitle("Shared Circuit Sizes", fontsize=14, y=1.0)
     fig.tight_layout()
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -383,12 +376,12 @@ def plot_circuit_sizes_multi_k(
             df_pct.plot.bar(ax=ax, rot=30, legend=False)
             ax.set_ylabel("% of Total Components")
             ax.set_ylim(0, 50)
-            ax.set_title(f"K={K}%", fontweight="bold")
+            ax.set_title(f"K={K}%")
         for idx in range(len(k_values), nrows * ncols):
             axes[idx // ncols][idx % ncols].set_visible(False)
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, bbox_to_anchor=(1.02, 0.5), loc="center left", fontsize=8)
-        fig.suptitle("Shared Circuit Sizes (% of Model Components)", fontsize=14, fontweight="bold", y=1.0)
+        fig.suptitle("Shared Circuit Sizes (% of Model Components)", fontsize=14, y=1.0)
         fig.tight_layout()
         fig.savefig(pct_path, dpi=200, bbox_inches="tight")
         plt.close(fig)

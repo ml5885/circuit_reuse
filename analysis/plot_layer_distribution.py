@@ -8,6 +8,7 @@ Plots:
   2. Layer line: per-K distribution over layers (cumulative, so y-axis is readable)
   3. Heatmap: normalized component density by layer and K% (compact)
   4. Head vs MLP inclusion rate: % of all heads / % of all MLPs in the circuit
+  5. MLP vs Head fraction: stacked bars showing MLP/head split across K%
 """
 
 import argparse
@@ -26,15 +27,15 @@ from circuit_reuse.dataset import get_model_display_name, get_task_display_name
 matplotlib.use("Agg")
 plt.rcParams.update({"font.family": "serif", "font.size": 14})
 
-SKIP_TASKS = ["arc_easy"]
+SKIP_TASKS = ["mmlu"]
 
-# Color palette — muted, modern, paper-friendly
+# Color palette
 COLORS = {
     "early": "#6a4c93",   # muted purple
     "middle": "#1982c4",  # calm blue
     "late": "#8ac926",    # fresh green
-    "head": "#6a4c93",    # purple
-    "mlp": "#ff595e",     # coral red
+    "head": "#f7a011",    # light orange (Asteroid City)
+    "mlp": "#7EC8B8",     # muted teal-blue (Asteroid City)
 }
 
 
@@ -124,6 +125,9 @@ def plot_stacked_area(
     n_layers_map: dict[str, int],
     output_dir: Path,
 ):
+    out_dir = output_dir / "stacked_area"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     for model, task_data in sorted(all_data.items()):
         tasks = sorted(task_data.keys())
         n_layers = n_layers_map[model]
@@ -163,7 +167,7 @@ def plot_stacked_area(
                 ax.set_xlabel("Top-K%", fontsize=14)
             if idx % ncols == 0:
                 ax.set_ylabel("Fraction of Circuit", fontsize=14)
-            ax.tick_params(labelsize=11)
+            ax.tick_params(labelsize=12)
 
         for k in range(len(tasks), nrows * ncols):
             fig.delaxes(axes[k // ncols][k % ncols])
@@ -172,11 +176,10 @@ def plot_stacked_area(
         fig.legend(handles, labels, loc="lower center", ncol=3, fontsize=13,
                    bbox_to_anchor=(0.5, -0.06))
         model_disp = get_model_display_name(model)
-        fig.suptitle(f"{model_disp}: Circuit Layer Distribution", fontsize=20, fontweight="bold")
-        fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+        fig.tight_layout(rect=[0, 0.02, 1, 1.0])
 
         safe = model.replace("/", "_")
-        out = output_dir / f"stacked_area_{safe}.png"
+        out = out_dir / f"stacked_area_{safe}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"[SAVED] {out}")
@@ -193,6 +196,9 @@ def plot_layer_heatmap(
 ):
     """Per model: compact heatmap. Each task gets one column showing combined
     head+MLP density. Layers on y-axis, K% on x-axis."""
+    out_dir = output_dir / "layer_heatmap"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     cmap = LinearSegmentedColormap.from_list("density", ["#f7f7f7", "#6a4c93"], N=256)
 
     for model, task_data in sorted(all_data.items()):
@@ -223,7 +229,6 @@ def plot_layer_heatmap(
             ax.set_xticks(range(len(k_percents)))
             ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=10, rotation=45, ha="right")
 
-            # Show layer ticks at regular intervals
             step = max(1, n_layers // 8)
             tick_pos = list(range(0, n_layers, step))
             tick_labels = [str(n_layers - 1 - t) for t in tick_pos]
@@ -240,11 +245,10 @@ def plot_layer_heatmap(
         cbar.set_label("Fraction of Circuit", fontsize=12)
         cbar.ax.tick_params(labelsize=9)
 
-        fig.suptitle(f"{model_disp}: Component Density by Layer", fontsize=18, fontweight="bold")
-        fig.tight_layout(rect=[0, 0, 0.92, 0.94])
+        fig.tight_layout(rect=[0, 0, 0.92, 1.0])
 
         safe = model.replace("/", "_")
-        out = output_dir / f"layer_heatmap_{safe}.png"
+        out = out_dir / f"layer_heatmap_{safe}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"[SAVED] {out}")
@@ -260,6 +264,9 @@ def plot_layer_lines(
     output_dir: Path,
 ):
     """Per model: line plots showing cumulative fraction of circuit by layer."""
+    out_dir = output_dir / "layer_line"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     cmap = plt.get_cmap("magma")
 
     for model, task_data in sorted(all_data_counts.items()):
@@ -290,11 +297,13 @@ def plot_layer_lines(
                 ax.plot(layers, cumulative, marker=".", markersize=3,
                         color=k_colors[k], label=f"{k:g}%", linewidth=1.8, alpha=0.85)
 
-            ax.set_title(get_task_display_name(task), fontsize=15)
-            ax.set_xlabel("Layer", fontsize=13)
-            if idx % ncols == 0:
-                ax.set_ylabel("Cumulative Fraction", fontsize=13)
-            ax.tick_params(labelsize=10)
+            ax.set_title(get_task_display_name(task), fontsize=28, pad=8)
+            if idx // ncols == nrows - 1:
+                ax.set_xlabel("Layer", fontsize=24)
+            else:
+                ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.tick_params(labelsize=20)
             ax.set_xlim(0, n_layers - 1)
             ax.set_ylim(0, 1.05)
             ax.axhline(0.5, color="gray", linewidth=0.8, linestyle=":", alpha=0.5)
@@ -303,14 +312,13 @@ def plot_layer_lines(
             fig.delaxes(axes[k // ncols][k % ncols])
 
         handles, labels = axes[0][0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="lower center", ncol=len(k_percents), fontsize=11,
-                   title="Top-K%", title_fontsize=13, bbox_to_anchor=(0.5, -0.06))
-        fig.suptitle(f"{model_disp}: Cumulative Layer Distribution",
-                     fontsize=18, fontweight="bold")
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        fig.legend(handles, labels, loc="lower center", ncol=len(k_percents), fontsize=22,
+                   title="Top-K%", title_fontsize=24, bbox_to_anchor=(0.5, -0.12))
+        fig.supylabel("Cumulative Fraction", fontsize=26, x=0.06)
+        fig.tight_layout(rect=[0.06, 0.03, 1, 1.0])
 
         safe = model.replace("/", "_")
-        out = output_dir / f"layer_line_{safe}.png"
+        out = out_dir / f"layer_line_{safe}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"[SAVED] {out}")
@@ -327,6 +335,9 @@ def plot_head_mlp_inclusion(
 ):
     """Per model: grouped bars showing what % of all heads and % of all MLPs
     are in the top-K% circuit (averaged over examples)."""
+    out_dir = output_dir / "head_mlp_inclusion"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     for model, task_data in sorted(all_data_counts.items()):
         tasks = sorted(task_data.keys())
         model_disp = get_model_display_name(model)
@@ -334,7 +345,7 @@ def plot_head_mlp_inclusion(
 
         ncols = min(len(tasks), 3)
         nrows = math.ceil(len(tasks) / ncols)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.0 * nrows), squeeze=False)
 
         for idx, task in enumerate(tasks):
             ax = axes[idx // ncols][idx % ncols]
@@ -350,19 +361,88 @@ def plot_head_mlp_inclusion(
 
             x = np.arange(len(k_percents))
             w = 0.35
-            ax.bar(x - w / 2, head_pcts, w, color=COLORS["head"], label="Attn Heads",
+            ax.bar(x - w / 2, head_pcts, w, color=COLORS["head"], label="Attention Heads",
                    edgecolor="white", linewidth=0.5, alpha=0.85)
             ax.bar(x + w / 2, mlp_pcts, w, color=COLORS["mlp"], label="MLPs",
                    edgecolor="white", linewidth=0.5, alpha=0.85)
 
             ax.set_xticks(x)
-            ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=10)
+            ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=14)
+            ax.set_title(get_task_display_name(task), fontsize=19, pad=4)
+            if idx // ncols == nrows - 1:
+                ax.set_xlabel("Top-K%", fontsize=15)
+            ax.tick_params(labelsize=14)
+
+        for k in range(len(tasks), nrows * ncols):
+            fig.delaxes(axes[k // ncols][k % ncols])
+
+        fig.supylabel("% of Model Components in Circuit", fontsize=20, x=0.06, y=0.52)
+
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=17,
+                   bbox_to_anchor=(0.52, -0.04))
+        fig.tight_layout(rect=[0.04, 0.02, 1, 1.0])
+
+        safe = model.replace("/", "_")
+        out = out_dir / f"head_mlp_inclusion_{safe}.png"
+        fig.savefig(out, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[SAVED] {out}")
+
+
+# ---------------------------------------------------------------------------
+# Plot 5: MLP vs Head fraction — stacked bars across K%
+# ---------------------------------------------------------------------------
+def plot_mlp_head_fraction(
+    all_data_counts: dict[str, dict[str, dict[float, dict[str, np.ndarray]]]],
+    k_percents: list[float],
+    output_dir: Path,
+):
+    """Per model: stacked bars showing fraction of circuit that is MLP vs heads,
+    sweeping across top-K%."""
+    out_dir = output_dir / "mlp_head_fraction"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for model, task_data in sorted(all_data_counts.items()):
+        tasks = sorted(task_data.keys())
+        model_disp = get_model_display_name(model)
+
+        ncols = min(len(tasks), 3)
+        nrows = math.ceil(len(tasks) / ncols)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 3.5 * nrows), squeeze=False)
+
+        for idx, task in enumerate(tasks):
+            ax = axes[idx // ncols][idx % ncols]
+            counts = task_data[task]
+
+            mlp_fracs = []
+            head_fracs = []
+            for k in k_percents:
+                h = counts[k]["head"].sum()
+                m = counts[k]["mlp"].sum()
+                total = h + m
+                if total > 0:
+                    mlp_fracs.append(m / total)
+                    head_fracs.append(h / total)
+                else:
+                    mlp_fracs.append(0)
+                    head_fracs.append(0)
+
+            x = np.arange(len(k_percents))
+            ax.bar(x, mlp_fracs, color=COLORS["mlp"], label="MLPs",
+                   edgecolor="white", linewidth=0.5, alpha=0.85)
+            ax.bar(x, head_fracs, bottom=mlp_fracs, color=COLORS["head"], label="Attention Heads",
+                   edgecolor="white", linewidth=0.5, alpha=0.85)
+
+            ax.set_xticks(x)
+            ax.set_xticklabels([f"{k:g}%" for k in k_percents], fontsize=12)
+            ax.set_ylim(0, 1.05)
             ax.set_title(get_task_display_name(task), fontsize=15)
             if idx // ncols == nrows - 1:
                 ax.set_xlabel("Top-K%", fontsize=13)
             if idx % ncols == 0:
-                ax.set_ylabel("% Included in Circuit", fontsize=13)
-            ax.tick_params(labelsize=10)
+                ax.set_ylabel("Share of Circuit Components", fontsize=13)
+            ax.tick_params(labelsize=12)
 
         for k in range(len(tasks), nrows * ncols):
             fig.delaxes(axes[k // ncols][k % ncols])
@@ -370,11 +450,10 @@ def plot_head_mlp_inclusion(
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=13,
                    bbox_to_anchor=(0.5, -0.04))
-        fig.suptitle(f"{model_disp}: Component Inclusion Rate", fontsize=18, fontweight="bold")
-        fig.tight_layout(rect=[0, 0.02, 1, 0.95])
+        fig.tight_layout(rect=[0, 0.02, 1, 1.0])
 
         safe = model.replace("/", "_")
-        out = output_dir / f"head_mlp_inclusion_{safe}.png"
+        out = out_dir / f"mlp_head_fraction_{safe}.png"
         fig.savefig(out, dpi=200, bbox_inches="tight")
         plt.close(fig)
         print(f"[SAVED] {out}")
@@ -385,7 +464,7 @@ def main():
     p.add_argument("--cache-dir", type=str, default="cache")
     p.add_argument("--output-dir", type=str, default="results2/layer_distribution")
     p.add_argument("--k-percents", type=str, default="1,5,10,20,30")
-    p.add_argument("--exclude-tasks", type=str, default="arc_easy")
+    p.add_argument("--exclude-tasks", type=str, default="mmlu")
     args = p.parse_args()
 
     cache_dir = Path(args.cache_dir)
@@ -427,6 +506,7 @@ def main():
     plot_layer_heatmap(all_frac, k_percents, n_layers_map, output_dir)
     plot_layer_lines(all_counts, k_percents, n_layers_map, output_dir)
     plot_head_mlp_inclusion(all_counts, k_percents, component_totals, output_dir)
+    plot_mlp_head_fraction(all_counts, k_percents, output_dir)
 
     print(f"\nAll plots saved to {output_dir}")
 

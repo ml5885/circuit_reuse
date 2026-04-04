@@ -171,7 +171,7 @@ def compute_lift(df: pd.DataFrame, split: str) -> pd.Series:
     c = df[f"control_{split}_accuracy"].astype(float)
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        lift = (a - c) / b
+        lift = (c - a) / b
 
     return pd.to_numeric(lift).replace([np.inf, -np.inf], np.nan)
 
@@ -383,7 +383,7 @@ def plot_lift_bars(
 
         ax.set_xticks(x)
         ax.set_xticklabels(tasks, rotation=30, ha="right")
-        ax.set_ylabel("Lift")
+        ax.set_ylabel("Necessity")
 
         title = f"{model_disp} k={int(k_val)}"
         if isinstance(method_disp, str) and method_disp:
@@ -397,7 +397,7 @@ def plot_lift_bars(
 
         safe_model = safe_filename(model_disp)
         safe_method = safe_filename(str(method_disp).lower())
-        outp = out_dir / f"{safe_model}/{int(k_val)}/{safe_model}_{safe_method}_k{int(k_val)}_lift_{split}"
+        outp = out_dir / f"{safe_model}/{int(k_val)}/{safe_model}_{safe_method}_k{int(k_val)}_necessity_{split}"
 
         if p is not None:
             outp = outp.with_name(outp.name + f"_p{p}")
