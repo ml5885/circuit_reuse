@@ -148,6 +148,12 @@ def parse_args() -> argparse.Namespace:
         help="Login-accessible directory for small outputs (metrics.json). "
              "Mirrors the run_dir structure. If unset, metrics are only saved under --output-dir.",
     )
+    parser.add_argument(
+        "--parity",
+        action="store_true",
+        help="Include shared components in the control sampling pool (C^3 parity). "
+             "Default is exclude (C^3 exclude).",
+    )
     return parser.parse_args()
 
 
@@ -334,6 +340,7 @@ def _run_single_combination(
     granularity: str = "head_mlp",
     score_threshold: float | None = None,
     max_prompt_chars: int | None = None,
+    parity: bool = False,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -467,7 +474,7 @@ def _run_single_combination(
 
             rng_seed = int(hashlib.md5(f"{combo_key_root}|tau{score_threshold}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(rng_seed)
-            control_removed = _sample_control_components(shared, all_components, rng, ignore_type=ignore_type) if shared_size > 0 else []
+            control_removed = _sample_control_components(shared, all_components, rng, parity=parity, ignore_type=ignore_type) if shared_size > 0 else []
 
             if shared_size > 0:
                 ablation_train_correct, ablation_train_total, ablation_train_preds = evaluate_predictions(
@@ -573,7 +580,7 @@ def _run_single_combination(
             # Evaluate ablations and collect per-example correctness for permutation tests
             rng_seed = int(hashlib.md5(f"{combo_key_root}|K{K}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
             rng = random.Random(rng_seed)
-            control_removed = _sample_control_components(shared, all_components, rng, ignore_type=ignore_type) if shared_size > 0 else []
+            control_removed = _sample_control_components(shared, all_components, rng, parity=parity, ignore_type=ignore_type) if shared_size > 0 else []
 
             if shared_size > 0:
                 ablation_train_correct, ablation_train_total, ablation_train_preds = evaluate_predictions(
@@ -748,6 +755,7 @@ def main():
             granularity=granularity,
             score_threshold=args.score_threshold,
             max_prompt_chars=args.max_prompt_chars,
+            parity=args.parity,
         )
     except Exception as e:
         print(f"[FATAL] {e}")
