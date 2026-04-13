@@ -2,6 +2,7 @@ import argparse, json, re
 from pathlib import Path
 
 import numpy as np
+import scipy.stats
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
@@ -325,14 +326,18 @@ def plot_diagonal_vs_offdiag(data, out_dir):
 
         diag = [drop[t][t] for t in tasks]
         offdiag = []
+        offdiag_ci = []
         for tgt in tasks:
             vals = [drop[src][tgt] for src in tasks if src != tgt]
             offdiag.append(np.mean(vals))
+            n = len(vals)
+            se = np.std(vals, ddof=1) / np.sqrt(n)
+            offdiag_ci.append(scipy.stats.t.ppf(0.975, df=n - 1) * se)
 
         x = np.arange(len(tasks))
         w = 0.35
         ax.bar(x - w / 2, diag, w, label="Own circuit", color="#6A0572", edgecolor="none")
-        ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
+        ax.bar(x + w / 2, offdiag, w, yerr=offdiag_ci, capsize=3, error_kw={"linewidth": 1.2}, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
         k_suffix = _format_topk_suffix(d)
@@ -366,7 +371,7 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
     chunk_size = 6
     for chunk_idx in range(0, len(data), chunk_size):
         chunk = data[chunk_idx : chunk_idx + chunk_size]
-        fig, axes = plt.subplots(2, 3, figsize=(14, 5.5), squeeze=False, sharey=True)
+        fig, axes = plt.subplots(2, 3, figsize=(14, 8), squeeze=False, sharey=True)
         axes_flat = axes.flatten()
 
         k_val = chunk[0].get("_topk") or chunk[0].get("K") or ""
@@ -379,14 +384,18 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
 
             diag = [drop[t][t] for t in tasks]
             offdiag = []
+            offdiag_ci = []
             for tgt in tasks:
                 vals = [drop[src][tgt] for src in tasks if src != tgt]
                 offdiag.append(np.mean(vals))
+                n = len(vals)
+                se = np.std(vals, ddof=1) / np.sqrt(n)
+                offdiag_ci.append(scipy.stats.t.ppf(0.975, df=n - 1) * se)
 
             x = np.arange(len(tasks))
             w = 0.35
             ax.bar(x - w / 2, diag, w, label="Own circuit", color="#6A0572", edgecolor="none")
-            ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
+            ax.bar(x + w / 2, offdiag, w, yerr=offdiag_ci, capsize=3, error_kw={"linewidth": 1.2}, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
             ax.set_xticks(x)
             ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=13)
             ax.set_title(_format_model_title(d), fontsize=18, pad=4)

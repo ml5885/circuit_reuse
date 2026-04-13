@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Iterable, List, Tuple, Any, Dict, Optional
 import torch
 from .dataset import Example
 from .circuit_extraction import Component
 from contextlib import nullcontext
+
+
+def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, callable]]:
+    """Build forward hooks that zero-ablate the given components.
+
+    Groups components by (kind, layer) so each hook point gets at most one hook,
+    even when ablating thousands of neurons.
+    """
+    heads_by_layer: Dict[int, List[int]] = defaultdict(list)
+    neurons_by_layer: Dict[int, List[int]] = defaultdict(list)
+    mlp_layers: set = set()
+
+    for comp in removed:
+        if comp.kind == "head":
+            heads_by_layer[comp.layer].append(comp.index)
+        elif comp.kind == "mlp":
+            mlp_layers.add(comp.layer)
+        elif comp.kind == "neuron":
+            neurons_by_layer[comp.layer].append(comp.index)
+
+    hooks: List[Tuple[str, callable]] = []
+
+    for layer, indices in heads_by_layer.items():
+        idx = torch.tensor(indices)
+        def hook_heads(act, hook=None, idx=idx):
+            act[:, :, idx, :] = 0.0
+            return act
+        hooks.append((f"blocks.{layer}.attn.hook_result", hook_heads))
+
+    for layer in mlp_layers:
+        def hook_mlp(act, hook=None):
+            act[:, :, :] = 0.0
+            return act
+        hooks.append((f"blocks.{layer}.hook_mlp_out", hook_mlp))
+
+    for layer, indices in neurons_by_layer.items():
+        idx = torch.tensor(indices)
+        def hook_neurons(act, hook=None, idx=idx):
+            act[:, :, idx] = 0.0
+            return act
+        hooks.append((f"blocks.{layer}.mlp.hook_post", hook_neurons))
+
+    return hooks
 
 
 def _extract_gold_ids(model: Any, prompt: str, target: str, device, verbose: bool = False) -> List[int]:
@@ -174,23 +218,7 @@ def evaluate_accuracy_with_ablation(
     model: Any, dataset: Iterable[Example], task: str, removed: Iterable[Component], verbose: bool = False
 ) -> Tuple[int, int]:
     model.eval()
-    hooks: List[Tuple[str, callable]] = []
-    for comp in removed:
-        if comp.kind == "head":
-            def hook_head(act, hook=None, head_index=comp.index):
-                act[:, :, head_index, :] = 0.0
-                return act
-            hooks.append((f"blocks.{comp.layer}.attn.hook_result", hook_head))
-        elif comp.kind == "mlp":
-            def hook_mlp(act, hook=None):
-                act[:, :, :] = 0.0
-                return act
-            hooks.append((f"blocks.{comp.layer}.hook_mlp_out", hook_mlp))
-        elif comp.kind == "neuron":
-            def hook_neuron(act, hook=None, neuron_idx=comp.index):
-                act[:, :, neuron_idx] = 0.0
-                return act
-            hooks.append((f"blocks.{comp.layer}.mlp.hook_post", hook_neuron))
+    hooks = _build_ablation_hooks(removed)
 
     correct, total = 0, 0
     device = model.cfg.device
@@ -240,25 +268,7 @@ def evaluate_predictions(
         {"prompt": str, "target": str, "pred": str | int, "is_correct": bool}
     """
     model.eval()
-    hooks: List[Tuple[str, callable]] = []
-
-    if removed:
-        for comp in removed:
-            if comp.kind == "head":
-                def hook_head(act, hook=None, head_index=comp.index):
-                    act[:, :, head_index, :] = 0.0
-                    return act
-                hooks.append((f"blocks.{comp.layer}.attn.hook_result", hook_head))
-            elif comp.kind == "mlp":
-                def hook_mlp(act, hook=None):
-                    act[:, :, :] = 0.0
-                    return act
-                hooks.append((f"blocks.{comp.layer}.hook_mlp_out", hook_mlp))
-            elif comp.kind == "neuron":
-                def hook_neuron(act, hook=None, neuron_idx=comp.index):
-                    act[:, :, neuron_idx] = 0.0
-                    return act
-                hooks.append((f"blocks.{comp.layer}.mlp.hook_post", hook_neuron))
+    hooks = _build_ablation_hooks(removed) if removed else []
 
     per_ex: List[Dict[str, Any]] = []
     correct, total = 0, 0

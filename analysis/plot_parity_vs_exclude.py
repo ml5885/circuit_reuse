@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
@@ -65,7 +66,8 @@ def main():
     models = sorted(grouped["model_display"].unique())
     tasks = sorted(grouped["task_display"].unique())
     conditions = ["Exclude", "Parity"]
-    colors = {"Exclude": "#d62728", "Parity": "#2ca02c"}
+    pastel = sns.color_palette("pastel")
+    colors = {"Exclude": pastel[0], "Parity": pastel[3]}
 
     plt.rcParams.update({"font.family": "serif", "font.size": 12})
 
@@ -93,19 +95,22 @@ def main():
 
         ax.axhline(0, color="gray", linewidth=1, linestyle="--", alpha=0.7)
         ax.set_xticks(x)
-        ax.set_xticklabels(tasks, rotation=30, ha="right", fontsize=10)
+        if idx // ncols == nrows - 1:
+            ax.set_xticklabels(tasks, rotation=30, ha="right", fontsize=10)
+        else:
+            ax.set_xticklabels([])
         ax.set_title(model, fontsize=14)
         ax.grid(axis="y", linestyle="-", alpha=0.3)
 
         if idx % ncols == 0:
-            ax.set_ylabel("Necessity", fontsize=12)
+            ax.set_ylabel("Necessity", fontsize=16)
 
     for idx in range(len(models), nrows * ncols):
         fig.delaxes(axes[idx // ncols][idx % ncols])
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, -0.02),
-               ncol=2, fontsize=12, frameon=True)
+               ncol=2, fontsize=16, frameon=True)
 
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     out = Path("results/parity_vs_exclude_necessity.png")

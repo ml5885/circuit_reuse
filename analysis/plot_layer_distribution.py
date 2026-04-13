@@ -376,11 +376,11 @@ def plot_head_mlp_inclusion(
         for k in range(len(tasks), nrows * ncols):
             fig.delaxes(axes[k // ncols][k % ncols])
 
-        fig.supylabel("% of Model Components in Circuit", fontsize=20, x=0.06, y=0.52)
+        fig.supylabel("% Included in Circuit", fontsize=20, x=0.06, y=0.52)
 
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=17,
-                   bbox_to_anchor=(0.52, -0.04))
+                   bbox_to_anchor=(0.52, -0.06))
         fig.tight_layout(rect=[0.04, 0.02, 1, 1.0])
 
         safe = model.replace("/", "_")
@@ -450,6 +450,7 @@ def plot_mlp_head_fraction(
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=2, fontsize=13,
                    bbox_to_anchor=(0.5, -0.04))
+        fig.suptitle(model_disp, fontsize=17, y=1.02)
         fig.tight_layout(rect=[0, 0.02, 1, 1.0])
 
         safe = model.replace("/", "_")
