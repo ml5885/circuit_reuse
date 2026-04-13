@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 
 from models.olmo_adapter import load_model_any
-from circuit_reuse.dataset import get_dataset
+from circuit_reuse.dataset import get_dataset, apply_few_shot_prefix
 from circuit_reuse.evaluate import evaluate_accuracy_with_ablation, evaluate_accuracy
 from circuit_reuse.circuit_extraction import Component
 
@@ -163,7 +163,7 @@ def main():
     for task in tasks:
         digits = args.digits if (args.digits and task == "addition") else 2
         ds = get_dataset(task, num_examples=args.num_examples, digits=digits)
-        datasets[task] = list(ds)
+        datasets[task] = apply_few_shot_prefix(list(ds), task, args.model_name)
         bc, bt = evaluate_accuracy(model, datasets[task], task=task)
         baseline_correct[task] = bc
         baseline_total[task] = bt

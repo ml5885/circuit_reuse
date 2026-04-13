@@ -12,7 +12,7 @@ import hashlib
 import torch
 
 from models.olmo_adapter import load_model_any
-from circuit_reuse.dataset import get_dataset, Example
+from circuit_reuse.dataset import get_dataset, apply_few_shot_prefix, Example
 from circuit_reuse.circuit_extraction import (
     CircuitExtractor,
     Component,
@@ -346,6 +346,7 @@ def _run_single_combination(
     random.seed(seed)
 
     dataset = get_dataset(task, num_examples=num_examples, digits=digits if digits is not None else 0, max_prompt_chars=max_prompt_chars)
+    dataset = apply_few_shot_prefix(dataset, task, model_name)
     print(f"[{model_name}/{task}] Generated {len(dataset)} examples for method '{method}'.")
 
     # Split into train/val

@@ -366,6 +366,33 @@ def get_model_display_name(model: str) -> str:
     return " ".join([first] + rest)
 
 
+ADDITION_FEW_SHOT_PREFIX = (
+    "Compute: 100 + 200 = 300\n"
+    "Compute: 456 + 123 = 579\n"
+    "Compute: 999 + 1 = 1000\n"
+)
+
+MODELS_NEEDING_FEW_SHOT_ADDITION = {"google/gemma-2-2b-it", "gemma-2-2b-it"}
+
+
+def apply_few_shot_prefix(examples: Iterable[Example], task: str, model_name: str) -> list[Example]:
+    """Prepend few-shot examples to addition prompts for models that need them."""
+    examples = list(examples)
+    if task != "addition" or model_name not in MODELS_NEEDING_FEW_SHOT_ADDITION:
+        return examples
+    return [
+        Example(
+            prompt=ADDITION_FEW_SHOT_PREFIX + ex.prompt,
+            target=ex.target,
+            corrupted_prompt=ADDITION_FEW_SHOT_PREFIX + ex.corrupted_prompt,
+            corrupted_target=ex.corrupted_target,
+            labels=ex.labels,
+            answer_idx=ex.answer_idx,
+        )
+        for ex in examples
+    ]
+
+
 def get_dataset(task: str, num_examples: int = 100, digits: int = 2, max_prompt_chars: int | None = None) -> Iterable[Example]:
     if task == "addition":
         return AdditionDataset(num_examples=num_examples, digits=digits)
@@ -391,6 +418,7 @@ __all__ = [
     "MCQADataset",
     "ARCDataset",
     "get_dataset",
+    "apply_few_shot_prefix",
     "get_task_display_name",
     "get_model_display_name",
 ]
