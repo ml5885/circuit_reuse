@@ -47,4 +47,15 @@ htmlcov/
 
 data/
 results*/
+cache/
 scratch/
+
+OVERVIEW.md
+
+scripts/
+reference_code/
+tests/
+docs/
+paper/
+new_plots/
+*.png

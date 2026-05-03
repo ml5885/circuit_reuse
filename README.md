@@ -35,7 +35,12 @@ python cross_task_experiment.py \
 - `--perm-trials`: Trials for paired permutation test (shared vs control).
 - `--ignore-type`: Sample control randomly regardless of head/MLP type.
 - `--analysis`: Skip extraction, load cached attributions only.
-- `--method`: Attribution method (`eap`, `gradient`, or `neuron_attr`).
+- `--method`: Attribution method (`eap`, `eap_ig`, `relp`, or `neuron_attr`). `neuron_attr` is a deprecated alias for `--method relp --granularity neuron`.
+- `--ig-steps`: Number of interpolation steps for `--method eap_ig` (default: `5`).
+- `--task-metric`: Attribution objective (`logprob` by default, or `kl`).
+- `--granularity`: `head_mlp` (default) or `neuron`. `neuron` requires `--method relp`.
+- `--use-lrp` / `--no-use-lrp`: force LRP backward rules on/off. Default: on for `relp`, off otherwise.
+- `--lrp-rules`: comma-separated LRP rules. Default: `LN-rule,AH-rule,Half-rule`.
 - `--score-threshold`: Absolute score threshold (e.g., `0.005`). When set, selects components by score magnitude instead of top-K%.
 
 ## Analysis scripts
@@ -52,42 +57,60 @@ All in `analysis/`:
 
 ## Attribution methods
 
-| Method | Granularity | Scoring | Description |
+| Method | Scoring path | Formula | Description |
 |---|---|---|---|
-| `"eap"` (default) | Edge-level | `activation_diff × gradient` on edges | Edge Attribution Patching (Syed et al. 2023). Scores edges between components, aggregated to per-component scores |
-| `"gradient"` | Edge-level | Clean-pass gradient magnitude | Same graph as EAP but uses only the clean gradient (no corrupted forward pass) |
-| `"neuron_attr"` | Node-level | `activation_diff × gradient` per neuron/head | Following Arora et al. ("Language Model Circuits Are Sparse in the Neuron Basis"). Scores individual MLP neurons and attention heads directly — no edge graph needed |
+| `eap` (default) | Edge-level graph | `(corrupted_act − clean_act) × clean_grad` on edges, aggregated per node | Edge Attribution Patching (Syed et al. 2023). Clean and corrupted sequences are padded to a shared length and run with explicit attention masks. |
+| `eap_ig` | Edge-level graph | `mean_t[(corrupted_act − clean_act) × grad_t]` along the clean↔corrupted input-embedding path | EAP with integrated gradients over inputs, using the same paired-input padding and attention-mask handling as `eap`. |
+| `relp` | Node-level | `corrupted_grad × (clean_act − corrupted_act)` at one hook per component | Relevance Patching (Jafari et al. 2025, arXiv:2508.21258). The backward pass uses LRP rules (`LN-rule`, `AH-rule`, `Half-rule`) so gradients are better-conditioned through LayerNorm/RMSNorm, attention softmax, and gated-MLP multiplications. At `--granularity neuron` this reproduces the MLP-neuron-basis circuits of Arora et al. 2026 (arXiv:2601.22594). |
+| `neuron_attr` | Alias | — | Deprecated alias for `--method relp --granularity neuron`. |
 
-`neuron_attr` automatically uses neuron-level granularity (the `--granularity` flag is ignored).
+## Task metric
+
+`CircuitExtractor` optimizes a scalar objective over continuation positions during attribution.
+
+- `logprob` (default): sum of gold-token log-probabilities over the clean continuation.
+- `kl`: KL divergence to the paired reference logits. For the edge-graph methods (`eap`, `eap_ig`), gradients are taken on the clean/interpolated path against fixed corrupted logits. For `relp`, gradients are taken on the corrupted path against fixed clean logits.
 
 ## Node granularity
 
-The `CircuitExtractor` supports configurable node granularity via the `granularity` parameter:
-
-| Granularity | Nodes | Description |
+| Granularity | Components scored (at `--method relp`) | Notes |
 |---|---|---|
-| `"head_mlp"` (default) | Attention heads + MLP blocks | Standard per-head, per-MLP-layer circuit analysis |
-| `"block"` | Attention blocks + MLP blocks | Merges all heads in a layer into a single attention block node. Faster and lower memory, but loses head-level resolution |
-| `"neuron"` | Same graph as `head_mlp` | Same computation; reserved for future per-neuron score decomposition |
+| `head_mlp` (default) | Attention heads (at `attn.hook_z`) + MLP layer outputs (at `hook_mlp_out`) | Standard per-head, per-layer granularity. |
+| `neuron` | MLP neurons only (at `mlp.hook_post`, no attention) | Arora et al.'s neuron basis. Only valid with `--method relp`. |
+
+For the edge-graph methods `eap` and `eap_ig`, only `head_mlp` is supported; `neuron` requires `--method relp`.
 
 ```python
 from circuit_reuse.circuit_extraction import CircuitExtractor
 
-extractor = CircuitExtractor(model, method="eap", granularity="block")
+# RelP at head-level — scores attention heads and MLP layers with LRP backward
+extractor = CircuitExtractor(model, method="relp", granularity="head_mlp")
+
+# Arora's neuron-basis circuits — per-MLP-neuron RelP
+extractor = CircuitExtractor(model, method="relp", granularity="neuron")
+
+# Classic EAP edge-graph method (unchanged)
+extractor = CircuitExtractor(model, method="eap", granularity="head_mlp")
+
+# EAP-IG over interpolated input embeddings
+extractor = CircuitExtractor(model, method="eap_ig", granularity="head_mlp", ig_steps=5)
+
+# Use KL instead of summed gold-token log-prob
+extractor = CircuitExtractor(model, method="eap", task_metric="kl")
 ```
 
-**Impact on computation**: `"block"` reduces `n_forward` from `1 + n_layers*(n_heads+1)` to `1 + 2*n_layers`, proportionally shrinking the activation difference buffer and score matrix. For GPT-2 small this is 157 → 25.
+**Computational cost:** `relp` uses two forward passes and one backward pass per example. `eap_ig` uses one corrupted forward pass, one clean forward pass, and `ig_steps` backward passes along the interpolation path.
 
 ## Score threshold
 
 Use `--score-threshold` to select circuit components by absolute score magnitude instead of top-K percentage:
 
 ```bash
-# Extract + threshold-based selection
+# Extract + threshold-based selection at the MLP-neuron level
 python main_experiment.py \
   --model_name gpt2-small --task ioi --num_examples 50 \
   --top_k_list 5,10 --score-threshold 0.005 \
-  --method neuron_attr --device cpu
+  --method relp --granularity neuron --device cpu
 
 # Recompute from cached scores (no re-extraction)
 python main_experiment.py \
@@ -100,7 +123,7 @@ A component is included if `|score| >= τ × Σ|all scores|` for that example. R
 
 ## Caching
 
-Attribution scores are cached as JSONL in `cache/` (configurable via `--cache-dir`). Filename encodes model, revision, task, method, N, digits, and seed. Use `--force-extract` to recompute.
+Attribution scores are cached as JSONL in `cache/` (configurable via `--cache-dir`). Filenames encode model, revision, task, method, task metric when non-default, granularity when non-default, `ig_steps` for `eap_ig`, example count, digits, and seed. Use `--force-extract` to recompute.
 
 ## Output
 
@@ -108,7 +131,12 @@ Each run saves `metrics.json` with baseline accuracies, per-(K, p) shared circui
 
 Cross-task experiment saves a confusion matrix CSV and structured JSON with raw and baseline-normalized accuracy drops.
 
-## References
+## References & acknowledgements
 
-- [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens)
-- [eap-ig](https://github.com/hannamw/eap-ig)
+This project builds on:
+
+- [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens) — hook-based mechanistic-interpretability library; all forward passes and component hooks are TL primitives.
+- [eap-ig](https://github.com/hannamw/eap-ig) — our `eap` and `eap_ig` edge-graph paths (`circuit_reuse/graph.py`) are derived from this implementation of Edge Attribution Patching (Syed et al. 2023, [arXiv:2310.10348](https://arxiv.org/abs/2310.10348)).
+- [RelP (Jafari et al. 2025)](https://arxiv.org/abs/2508.21258) — the `relp` method and the LRP rules in `circuit_reuse/lrp_patch.py` are ported from the authors' TransformerLens fork at [FarnoushRJ/RelP](https://github.com/FarnoushRJ/RelP) (see `reference_code/RelP/`).
+- [ADAG / Arora et al. 2026](https://arxiv.org/abs/2601.22594) — "Language Model Circuits Are Sparse in the Neuron Basis." `--method relp --granularity neuron` reproduces their MLP-neuron-basis circuit scoring. The `reference_code/circuits/` directory vendors the ADAG library (Transluce) for comparison.
+- LRP propagation rules: LN-rule (Ali et al. 2022), AH-rule (Ali et al. 2022), Half-rule (Arras et al. 2019; Jafari et al. 2024).
