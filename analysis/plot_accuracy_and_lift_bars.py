@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
-METHOD_DISPLAY = {"eap": "EAP", "gradient": "Gradient"}
+METHOD_DISPLAY = {"eap": "EAP", "eap_ig": "EAP-IG"}
 
 
 def _extract_step_from_revision(rev: str) -> Optional[str]:

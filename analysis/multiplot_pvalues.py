@@ -15,7 +15,7 @@ from matplotlib.patches import Patch
 
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
-METHOD_DISPLAY = {"eap": "EAP", "gradient": "Gradient"}
+METHOD_DISPLAY = {"eap": "EAP", "eap_ig": "EAP-IG"}
 
 SKIP_TASKS = ["arc_easy", "mmlu"]
 

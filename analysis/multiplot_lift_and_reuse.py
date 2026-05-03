@@ -3,7 +3,6 @@ import argparse
 import json
 import math
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
@@ -17,7 +16,7 @@ from matplotlib.patches import Patch
 
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
-METHOD_DISPLAY = {"eap": "EAP", "gradient": "Gradient"}
+METHOD_DISPLAY = {"eap": "EAP", "eap_ig": "EAP-IG"}
 
 SKIP_TASKS = ["mmlu"]
 
@@ -193,28 +192,24 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
     methods = sorted(df_k["method_display"].dropna().unique().tolist())
     
     FONT_SIZES = {
-        "title": 36,
-        "label": 32,
-        "tick": 24,
-        "legend_title": 26,
-    }
-
-    TITLE_PARAMS = {
-        "title_y": 1,
+        "title": 28,
+        "label": 20,
+        "tick": 16,
+        "legend_title": 18,
     }
 
     shared_plot_params = {
-        "figsize": (4.0 * len(tasks), 1.8 * len(models)),
+        "figsize": (4.0 * len(tasks), 2.2 * len(models)),
         "constrained_layout": False,
         "squeeze": False,
     }
-    bbox_to_anchor = (0.5, -0.12)
+    bbox_to_anchor = (0.5, -0.10)
 
     if len(tasks) == 1:
         shared_plot_params["figsize"] = (14, 6)
-        bbox_to_anchor = (0.5, -0.20)
+        bbox_to_anchor = (0.5, -0.12)
 
-    shared_ticklabel_params = {"rotation": 30, "ha": "right", "fontsize": 22}
+    shared_ticklabel_params = {"rotation": 30, "ha": "right", "fontsize": 16}
     shared_grid_params = {"axis": "y", "linestyle": "-", "alpha": 0.8}
 
     def _plot_bars(ax, metric_map, ylabel, ylim, show_ylabel, show_xlabel, color_map):
@@ -242,11 +237,11 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
         else:
             ax.set_xticklabels([])
 
-        ax.tick_params(axis="y", labelsize=22)
+        ax.tick_params(axis="y", labelsize=12)
 
         if show_ylabel:
             ax.set_ylabel(ylabel, fontsize=FONT_SIZES["label"])
-            ax.tick_params(axis="y", labelsize=22)
+            ax.tick_params(axis="y", labelsize=12)
         else:
             ax.tick_params(axis="y", labelleft=False)
 
@@ -261,7 +256,7 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
         sub_m["lift"] = compute_lift(sub_m, split=split)
         rows, cols = _subplot_grid(len(tasks))
         fig, axes = plt.subplots(rows, cols, **shared_plot_params)
-        fig.subplots_adjust(wspace=0.1, hspace=0.15)
+        fig.subplots_adjust(wspace=0.1, hspace=0.25)
 
         for idx, task in enumerate(tasks):
             ax = axes[idx // cols][idx % cols]
@@ -281,7 +276,7 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
                 color_map=colors_lift,
             )
             ax.axhline(0.0, color="gray", linewidth=1, linestyle="--", alpha=0.7)
-            ax.set_title(task, fontsize=FONT_SIZES["title"], pad=20)
+            ax.set_title(task, fontsize=FONT_SIZES["title"], pad=8)
 
         for k in range(len(tasks), rows * cols):
             fig.delaxes(axes[k // cols][k % cols])
@@ -306,40 +301,66 @@ def _multiplot_for_k(df_k: pd.DataFrame, out_dir: Path, *, split: str, percent: 
 
         if plot_reuse:
             sub_m["reuse_metric"] = compute_reuse(sub_m, percent=percent)
-            fig, axes = plt.subplots(rows, cols, **shared_plot_params)
-            fig.subplots_adjust(wspace=0.1, hspace=0.15)
+            ps_line = [p for p in ps_sorted if p >= 75]
+            model_palette = sns.color_palette("colorblind", n_colors=len(models))
+            model_colors = {m: model_palette[i] for i, m in enumerate(models)}
 
+            fig, axes = plt.subplots(rows, cols, **shared_plot_params)
+            fig.subplots_adjust(wspace=0.1, hspace=0.25)
+
+            p_to_x = {p: i for i, p in enumerate(ps_line)}
             for idx, task in enumerate(tasks):
                 ax = axes[idx // cols][idx % cols]
                 dd = sub_m[sub_m["task_display"] == task]
-                metric_map: Dict[Tuple[str, int], float] = {}
-                for _, row in dd.iterrows():
-                    metric_map[(row["model_display"], int(row["reuse_threshold"]))] = row["reuse_metric"]
 
-                _plot_bars(
-                    ax,
-                    metric_map,
-                    ylabel="Reuse (%)" if percent else "Reuse",
-                    ylim=(0, 100 if percent else 1),
-                    show_ylabel=(idx % cols == 0),
-                    show_xlabel=(idx // cols == rows - 1),
-                    color_map=colors_reuse,
-                )
-                ax.set_title(task, fontsize=FONT_SIZES["title"], pad=4)
+                for model in models:
+                    sub_model = dd[dd["model_display"] == model].sort_values("reuse_threshold")
+                    xs, ys = [], []
+                    for _, row in sub_model.iterrows():
+                        p = int(row["reuse_threshold"])
+                        if p not in p_to_x:
+                            continue
+                        xs.append(p_to_x[p])
+                        ys.append(row["reuse_metric"])
+                    if not xs:
+                        continue
+                    ax.plot(
+                        xs, ys,
+                        marker="o", markersize=5,
+                        linewidth=1.8,
+                        color=model_colors[model],
+                        label=model,
+                    )
+
+                ax.set_xticks(list(p_to_x.values()))
+                ax.set_xticklabels([str(p) for p in ps_line])
+                ax.set_xlim(-0.3, len(ps_line) - 0.7)
+                ax.set_ylim(0, 100 if percent else 1)
+                ax.tick_params(axis="x", labelsize=12, rotation=0)
+                if idx % cols == 0:
+                    ax.set_ylabel("Reuse (%)" if percent else "Reuse",
+                                  fontsize=FONT_SIZES["label"])
+                    ax.tick_params(axis="y", labelsize=12)
+                else:
+                    ax.tick_params(axis="y", labelleft=False)
+                if idx // cols == rows - 1:
+                    ax.set_xlabel("Reuse threshold $p$ (%)", fontsize=FONT_SIZES["label"])
+                ax.grid(**shared_grid_params)
+                ax.set_title(task, fontsize=FONT_SIZES["title"], pad=8)
 
             for k in range(len(tasks), rows * cols):
                 fig.delaxes(axes[k // cols][k % cols])
 
-    
-            handles = [Patch(facecolor=colors_reuse[p], edgecolor="black", label=str(p)) for p in ps_sorted]
+            handles = [plt.Line2D([0], [0], color=model_colors[m], marker="o",
+                                  linewidth=1.8, markersize=5, label=m) for m in models]
             fig.legend(
                 handles=handles,
-                title="reuse@P",
+                title="Model",
                 loc="lower center",
                 bbox_to_anchor=bbox_to_anchor,
                 fontsize=FONT_SIZES["tick"],
                 title_fontsize=FONT_SIZES["legend_title"],
-                ncol=len(ps_sorted)
+                ncol=min(len(models), 6),
             )
 
             outp = out_dir / f"multiplot_reuse_k{k_val}_{safe_filename(method.lower())}.png"
@@ -465,7 +486,7 @@ def main():
     if available_reuse_ps:
         df = df[df["reuse_threshold"].isin(available_reuse_ps)]
 
-    out_dir = Path(args.output_dir) if args.output_dir else results_dir / f"plots_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    out_dir = Path(args.output_dir) if args.output_dir else results_dir / "reuse_lift"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Reuse plots (split-independent) go in their own folder
@@ -497,10 +518,6 @@ def main():
                 plot_reuse=False,
             )
 
-    # Line plots: checkpoints as lines, top_k on x-axis
-    out_dir_lines = out_dir / "lines"
-    out_dir_lines.mkdir(parents=True, exist_ok=True)
-    _lineplot_checkpoints_vs_k(df, out_dir_lines, split="train", percent=args.percent, plot_reuse=True)
 
 
 if __name__ == "__main__":

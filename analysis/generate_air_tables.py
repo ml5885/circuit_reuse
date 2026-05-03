@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from circuit_reuse.dataset import get_task_display_name, get_model_display_name
 
-METHOD_DISPLAY = {"eap": "EAP", "gradient": "Gradient"}
+METHOD_DISPLAY = {"eap": "EAP", "eap_ig": "EAP-IG"}
 
 def discover_metrics(results_dir: Path) -> List[Path]:
     if not results_dir.exists(): return []
@@ -133,7 +133,7 @@ def parse_args():
     p.add_argument("--results-dir", type=str, default="results_pretraining")
     p.add_argument("--output-dir", type=str, default=None)
     p.add_argument("--split", type=str, default="val", choices=["train", "val"])
-    p.add_argument("--method", type=str, default="eap", choices=["eap", "gradient"])
+    p.add_argument("--method", type=str, default="eap", choices=["eap", "eap_ig"])
     p.add_argument("--digits", type=int, default=3)
     return p.parse_args()
 
