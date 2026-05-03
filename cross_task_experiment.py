@@ -40,12 +40,9 @@ def parse_component_str(s):
     return Component(layer=layer, kind=kind.strip(), index=index)
 
 
-def find_metrics_file(results_dir, model_name, hf_revision, task):
-    """Search results_dir recursively for a metrics file matching the given settings.
-
-    Returns the path to the first matching metrics.json file.  Raises an
-    exception if no match is found.
-    """
+def find_metrics_file(results_dir, model_name, hf_revision, task, threshold=None, score_threshold=None, score_filter=None):
+    """Search results_dir recursively for a metrics file matching the given settings."""
+    candidates = []
     for root, _, files in os.walk(results_dir):
         if "metrics.json" in files:
             path = Path(root) / "metrics.json"
@@ -56,22 +53,42 @@ def find_metrics_file(results_dir, model_name, hf_revision, task):
                 and str(data["hf_revision"] or "none") == (hf_revision or "none")
                 and data["task"] == task
             ):
+                candidates.append((path, data))
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No metrics.json found in {results_dir} for model={model_name}, revision={hf_revision}, task={task}."
+        )
+
+    if score_filter is not None:
+        tau_key = str(score_filter)
+        for path, data in candidates:
+            if tau_key in data.get("by_score_filter", {}):
+                return path
+    elif score_threshold is not None:
+        tau_key = str(score_threshold)
+        for path, data in candidates:
+            if tau_key in data.get("by_threshold", {}):
+                return path
+    elif threshold is not None:
+        for path, data in candidates:
+            by_k = data.get("by_k", {})
+            if any(str(threshold) in entry.get("thresholds", {}) for entry in by_k.values()):
                 return path
 
-    raise FileNotFoundError(
-        f"No metrics.json found in {results_dir} for model={model_name}, revision={hf_revision}, task={task}."
-    )
+    return candidates[0][0]
 
 
-def load_shared_components(metrics_path, K, threshold):
-    """Load the list of shared components for a given K and threshold from a metrics file."""
+def load_shared_components(metrics_path, K, threshold, score_threshold=None, score_filter=None):
+    """Load shared components for a given threshold from a metrics file."""
     with metrics_path.open() as f:
         data = json.load(f)
-    by_k = data["by_k"]
-    entry = by_k[str(K)]
-    thresholds = entry["thresholds"]
-    thr_entry = thresholds[str(threshold)]
-    
+    if score_filter is not None:
+        thr_entry = data["by_score_filter"][str(score_filter)]["thresholds"][str(threshold)]
+    elif score_threshold is not None:
+        thr_entry = data["by_threshold"][str(score_threshold)]["thresholds"][str(threshold)]
+    else:
+        thr_entry = data["by_k"][str(K)]["thresholds"][str(threshold)]
     return [parse_component_str(c) for c in thr_entry["shared_components"]]
 
 
@@ -105,13 +122,27 @@ def main():
         "--K",
         type=int,
         default=10,
-        help="Top-K percentage used when constructing shared circuits.",
+        help="Top-K percentage used when constructing shared circuits (ignored when --score-threshold is set).",
     )
     parser.add_argument(
         "--threshold",
         type=int,
         default=100,
         help="Reuse threshold percentage (p) used to define the shared circuit.",
+    )
+    parser.add_argument(
+        "--score-threshold",
+        type=float,
+        default=None,
+        help="Attribution score threshold τ (fraction of total signal). "
+             "When set, reads circuits from by_threshold instead of by_k.",
+    )
+    parser.add_argument(
+        "--score-filter",
+        type=float,
+        default=None,
+        dest="score_filter",
+        help="Score-filter threshold τ: reads circuits from by_score_filter (score_v >= τ·m(M,x)).",
     )
     parser.add_argument(
         "--num-examples",
@@ -177,12 +208,20 @@ def main():
     skipped_tasks = set()
     for src_task in tasks:
         try:
-            metrics_path = find_metrics_file(results_dir, args.model_name, args.hf_revision, src_task)
+            metrics_path = find_metrics_file(
+                results_dir, args.model_name, args.hf_revision, src_task,
+                threshold=args.threshold, score_threshold=args.score_threshold,
+                score_filter=args.score_filter,
+            )
         except FileNotFoundError:
             print(f"[{src_task}] WARNING: no metrics found, skipping as source task")
             skipped_tasks.add(src_task)
             continue
-        shared_components = load_shared_components(metrics_path, args.K, args.threshold)
+        shared_components = load_shared_components(
+            metrics_path, args.K, args.threshold,
+            score_threshold=args.score_threshold,
+            score_filter=args.score_filter,
+        )
         circuit_sizes[src_task] = len(shared_components)
         print(f"[{src_task}] Loaded {len(shared_components)} shared components")
         for tgt_task in tasks:
@@ -225,7 +264,12 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
         model_slug = args.model_name.replace("/", "_")
-        prefix = f"cross_task_{model_slug}_K{args.K}_t{args.threshold}"
+        if args.score_filter is not None:
+            prefix = f"cross_task_{model_slug}_sf{args.score_filter}_t{args.threshold}"
+        elif args.score_threshold is not None:
+            prefix = f"cross_task_{model_slug}_tau{args.score_threshold}_t{args.threshold}"
+        else:
+            prefix = f"cross_task_{model_slug}_K{args.K}_t{args.threshold}"
 
         # Save CSV
         csv_path = out_dir / f"{prefix}.csv"
@@ -237,6 +281,8 @@ def main():
             "model_name": args.model_name,
             "hf_revision": args.hf_revision,
             "K": args.K,
+            "score_threshold": args.score_threshold,
+            "score_filter": args.score_filter,
             "threshold": args.threshold,
             "num_examples": args.num_examples,
             "seed": args.seed,

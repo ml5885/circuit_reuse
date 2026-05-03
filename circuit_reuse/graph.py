@@ -17,7 +17,7 @@ from torch import Tensor
 from transformer_lens import HookedTransformer
 from einops import einsum
 
-Granularity = Literal["head_mlp", "neuron", "block"]
+Granularity = Literal["head_mlp", "neuron"]
 
 
 class Node:
@@ -91,19 +91,6 @@ class AttentionNode(Node):
         )
 
 
-class AttentionBlockNode(Node):
-    """Represents an entire attention layer (all heads merged) for block granularity."""
-
-    def __init__(self, layer: int):
-        super().__init__(
-            f"attn{layer}",
-            layer,
-            f"blocks.{layer}.hook_attn_in",
-            f"blocks.{layer}.hook_attn_out",
-            slice(None),
-        )
-
-
 class InputNode(Node):
     def __init__(self):
         super().__init__("input", 0, "", "hook_embed", slice(None))
@@ -129,33 +116,19 @@ class Graph:
             return 0
         if isinstance(node, LogitNode):
             return self.n_forward
-        granularity = self.cfg.get("granularity", "head_mlp")
-        if granularity == "block":
-            if isinstance(node, AttentionBlockNode):
-                return 1 + 2 * node.layer
-            if isinstance(node, MLPNode):
-                return 2 + 2 * node.layer
-        else:
-            if isinstance(node, MLPNode):
-                return 1 + node.layer * (self.cfg["n_heads"] + 1) + self.cfg["n_heads"]
-            if isinstance(node, AttentionNode):
-                return 1 + node.layer * (self.cfg["n_heads"] + 1)
+        if isinstance(node, MLPNode):
+            return 1 + node.layer * (self.cfg["n_heads"] + 1) + self.cfg["n_heads"]
+        if isinstance(node, AttentionNode):
+            return 1 + node.layer * (self.cfg["n_heads"] + 1)
         raise ValueError(f"Invalid node type: {type(node)}")
 
     def forward_index(self, node: Node) -> int:
         if isinstance(node, InputNode):
             return 0
-        granularity = self.cfg.get("granularity", "head_mlp")
-        if granularity == "block":
-            if isinstance(node, AttentionBlockNode):
-                return 1 + 2 * node.layer
-            if isinstance(node, MLPNode):
-                return 2 + 2 * node.layer
-        else:
-            if isinstance(node, MLPNode):
-                return 1 + node.layer * (self.cfg["n_heads"] + 1) + self.cfg["n_heads"]
-            if isinstance(node, AttentionNode):
-                return 1 + node.layer * (self.cfg["n_heads"] + 1) + node.head
+        if isinstance(node, MLPNode):
+            return 1 + node.layer * (self.cfg["n_heads"] + 1) + self.cfg["n_heads"]
+        if isinstance(node, AttentionNode):
+            return 1 + node.layer * (self.cfg["n_heads"] + 1) + node.head
         raise ValueError(f"Node has no forward index: {node}")
 
     def backward_index(self, node: Node, qkv: Optional[str] = None) -> int:
@@ -163,30 +136,25 @@ class Graph:
             raise ValueError("InputNode has no backward index")
         if isinstance(node, LogitNode):
             return self.n_backward - 1
-        granularity = self.cfg.get("granularity", "head_mlp")
-        if granularity == "block":
-            if isinstance(node, AttentionBlockNode):
-                return 2 * node.layer
-            if isinstance(node, MLPNode):
-                return 2 * node.layer + 1
-        else:
-            total_per_layer = self.cfg["n_heads"] + 2 * self.cfg["n_kv_heads"] + 1
-            if isinstance(node, MLPNode):
-                return node.layer * total_per_layer + self.cfg["n_heads"] + 2 * self.cfg["n_kv_heads"]
-            if isinstance(node, AttentionNode):
-                layer_offset = node.layer * total_per_layer
-                if qkv is None:
-                    qkv = "v"
-                if qkv == "q":
-                    return layer_offset + node.head
-                elif qkv == "k":
-                    return layer_offset + self.cfg["n_heads"] + node.kv_head
-                elif qkv == "v":
-                    return layer_offset + self.cfg["n_heads"] + self.cfg["n_kv_heads"] + node.kv_head
+        total_per_layer = self.cfg["n_heads"] + 2 * self.cfg["n_kv_heads"] + 1
+        if isinstance(node, MLPNode):
+            return node.layer * total_per_layer + self.cfg["n_heads"] + 2 * self.cfg["n_kv_heads"]
+        if isinstance(node, AttentionNode):
+            layer_offset = node.layer * total_per_layer
+            if qkv is None:
+                qkv = "v"
+            if qkv == "q":
+                return layer_offset + node.head
+            elif qkv == "k":
+                return layer_offset + self.cfg["n_heads"] + node.kv_head
+            elif qkv == "v":
+                return layer_offset + self.cfg["n_heads"] + self.cfg["n_kv_heads"] + node.kv_head
         raise ValueError(f"Invalid node type or qkv: {type(node)}, {qkv}")
 
     @classmethod
     def from_model(cls, model: HookedTransformer, granularity: Granularity = "head_mlp") -> "Graph":
+        if granularity not in ("head_mlp", "neuron"):
+            raise ValueError(f"Unsupported granularity: {granularity!r}. Use 'head_mlp' or 'neuron'.")
         graph = Graph()
         cfg = model.cfg
         nkv_heads = getattr(cfg, "n_key_value_heads", None)
@@ -200,23 +168,15 @@ class Graph:
             "granularity": granularity,
         }
 
+        # head_mlp and neuron use the same graph structure;
+        # neuron differs only at the Component scoring level
         nodes: List[Node] = [InputNode()]
-        if granularity == "block":
-            for layer in range(cfg.n_layers):
-                nodes.append(AttentionBlockNode(layer))
-                nodes.append(MLPNode(layer))
-            nodes.append(LogitNode(cfg.n_layers))
-            graph.n_forward = 1 + 2 * cfg.n_layers
-            graph.n_backward = 2 * cfg.n_layers + 1
-        else:
-            # head_mlp and neuron use the same graph structure;
-            # neuron differs only at the Component scoring level
-            for layer in range(cfg.n_layers):
-                nodes.extend([AttentionNode(layer, h, graph.cfg) for h in range(cfg.n_heads)])
-                nodes.append(MLPNode(layer))
-            nodes.append(LogitNode(cfg.n_layers))
-            graph.n_forward = 1 + cfg.n_layers * (cfg.n_heads + 1)
-            graph.n_backward = cfg.n_layers * (cfg.n_heads + 2 * nkv_heads + 1) + 1
+        for layer in range(cfg.n_layers):
+            nodes.extend([AttentionNode(layer, h, graph.cfg) for h in range(cfg.n_heads)])
+            nodes.append(MLPNode(layer))
+        nodes.append(LogitNode(cfg.n_layers))
+        graph.n_forward = 1 + cfg.n_layers * (cfg.n_heads + 1)
+        graph.n_backward = cfg.n_layers * (cfg.n_heads + 2 * nkv_heads + 1) + 1
 
         for node in nodes:
             graph.nodes[node.name] = node
@@ -231,7 +191,7 @@ class Graph:
                 is_causal = (
                     isinstance(parent_node, InputNode)
                     or (parent_node.layer < child_node.layer)
-                    or (isinstance(parent_node, (AttentionNode, AttentionBlockNode))
+                    or (isinstance(parent_node, AttentionNode)
                         and isinstance(child_node, MLPNode)
                         and parent_node.layer == child_node.layer)
                     or isinstance(child_node, LogitNode)
@@ -285,7 +245,6 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
 
     n_heads = graph.cfg["n_heads"]
     n_kv = graph.cfg["n_kv_heads"]
-    granularity = graph.cfg.get("granularity", "head_mlp")
 
     fwd_hooks_clean, fwd_hooks_corrupted, bwd_hooks = [], [], []
     processed_attn_layers = set()
@@ -298,12 +257,7 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
             fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_idx, add=False, head_index=head_idx)))
 
         # Backward hooks
-        if isinstance(node, AttentionBlockNode):
-            # Block granularity: single backward hook on hook_attn_in
-            prev_idx = graph.prev_index(node)
-            bwd_idx = graph.backward_index(node)
-            bwd_hooks.append((node.in_hook, partial(gradient_hook, prev_idx, slice(bwd_idx, bwd_idx + 1))))
-        elif isinstance(node, AttentionNode):
+        if isinstance(node, AttentionNode):
             # Head-level: separate Q/K/V backward hooks per layer
             if node.layer in processed_attn_layers:
                 continue
@@ -331,6 +285,8 @@ def attribute_single_example(
     clean_tokens: Tensor,
     corrupted_tokens: Tensor,
     activation_difference: Tensor,
+    clean_attention_mask: Optional[Tensor] = None,
+    corrupted_attention_mask: Optional[Tensor] = None,
 ) -> Tensor:
     scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=model.cfg.dtype)
     activation_difference.zero_()
@@ -341,14 +297,81 @@ def attribute_single_example(
 
     with torch.no_grad():
         with model.hooks(fwd_hooks=fwd_hooks_corrupted):
-            model(corrupted_tokens)
+            corrupted_logits = model(corrupted_tokens, attention_mask=corrupted_attention_mask)
 
     with model.hooks(fwd_hooks=fwd_hooks_clean, bwd_hooks=bwd_hooks):
-        logits = model(clean_tokens)
-        metric_value = metric(logits, None, None, None)
+        logits = model(clean_tokens, attention_mask=clean_attention_mask)
+        metric_value = metric(logits, corrupted_logits, None, None)
         metric_value.backward()
 
     model.zero_grad(set_to_none=True)
     model.reset_hooks()
 
+    return scores.cpu()
+
+
+def attribute_single_example_ig(
+    model: HookedTransformer,
+    graph: Graph,
+    metric: Callable,
+    clean_tokens: Tensor,
+    corrupted_tokens: Tensor,
+    activation_difference: Tensor,
+    steps: int,
+    clean_attention_mask: Optional[Tensor] = None,
+    corrupted_attention_mask: Optional[Tensor] = None,
+) -> Tensor:
+    """Single-example EAP-IG over interpolated input embeddings.
+
+    This reimplements the input-interpolation EAP-IG path locally using the
+    existing single-example metric/extraction flow in this codebase.
+    """
+    if steps <= 0:
+        raise ValueError(f"steps must be positive, got {steps}")
+
+    scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=model.cfg.dtype)
+    activation_difference.zero_()
+
+    fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(
+        model, graph, activation_difference, scores
+    )
+    input_index = graph.forward_index(graph.nodes["input"])
+    # Slice to this example's actual sequence length — the work buffer is
+    # reused across examples and may be longer than clean_tokens, which would
+    # otherwise feed an oversize embedding into the model and blow up RoPE.
+    seq_len = clean_tokens.shape[1]
+
+    with torch.inference_mode():
+        with model.hooks(fwd_hooks=fwd_hooks_corrupted):
+            corrupted_logits = model(corrupted_tokens, attention_mask=corrupted_attention_mask)
+        corrupted_input_acts = activation_difference[:, :seq_len, input_index, :].clone()
+
+        with model.hooks(fwd_hooks=fwd_hooks_clean):
+            model(clean_tokens, attention_mask=clean_attention_mask)
+        clean_input_acts = corrupted_input_acts - activation_difference[:, :seq_len, input_index, :]
+
+    def input_interpolation_hook(alpha: float):
+        def hook_fn(activations, hook):
+            interpolated = corrupted_input_acts + alpha * (clean_input_acts - corrupted_input_acts)
+            interpolated = interpolated.to(activations.device)
+            interpolated.requires_grad_(True)
+            return interpolated
+
+        return hook_fn
+
+    for step in range(steps):
+        alpha = step / steps
+        with model.hooks(
+            fwd_hooks=[(graph.nodes["input"].out_hook, input_interpolation_hook(alpha))],
+            bwd_hooks=bwd_hooks,
+        ):
+            logits = model(clean_tokens, attention_mask=clean_attention_mask)
+            metric_value = metric(logits, corrupted_logits, None, None)
+            metric_value.backward()
+        model.zero_grad(set_to_none=True)
+        model.reset_hooks()
+
+    scores /= steps
+    model.zero_grad(set_to_none=True)
+    model.reset_hooks()
     return scores.cpu()

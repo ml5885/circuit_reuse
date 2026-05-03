@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         "--top_k_list",
         type=str,
         required=True,
-        help="Comma-separated list of per-example top-K values as percentages to evaluate (e.g., '5,10' for top-5%, top-10%).",
+        help="Comma-separated list of per-example top-K values as percentages to evaluate (e.g., '5,10' for top-5%%, top-10%%).",
     )
     parser.add_argument(
         "--reuse-thresholds",
@@ -79,7 +79,49 @@ def parse_args() -> argparse.Namespace:
         default="95,96,97,98,99,100",
         help="Comma-separated list of reuse thresholds p as percentages (e.g., '95,99,100' for reuse@95..).",
     )
-    parser.add_argument("--method", type=str, default="eap", choices=["eap", "gradient", "neuron_attr"], help="Attribution method.")
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="eap",
+        choices=["eap", "eap_ig", "relp", "neuron_attr"],
+        help="Attribution method. 'eap_ig' = EAP with integrated gradients over the input "
+             "embedding path. 'relp' = Relevance Patching (Jafari et al. 2025) with LRP "
+             "backward rules; works at all granularities. 'neuron_attr' is a deprecated alias "
+             "for '--method relp --granularity neuron' (Arora et al. 2026).",
+    )
+    parser.add_argument(
+        "--ig-steps",
+        type=int,
+        default=5,
+        help="Number of interpolation steps for --method eap_ig (default: 5).",
+    )
+    parser.add_argument(
+        "--task-metric",
+        type=str,
+        default="logprob",
+        choices=["logprob", "kl"],
+        help="Scalar task metric used for attribution. `logprob` sums gold-token log-probs "
+             "over the clean continuation; `kl` uses KL divergence to the paired reference logits.",
+    )
+    parser.add_argument(
+        "--use-lrp",
+        dest="use_lrp",
+        action="store_true",
+        default=None,
+        help="Enable LRP backward rules. Default: on for --method relp, off otherwise.",
+    )
+    parser.add_argument(
+        "--no-use-lrp",
+        dest="use_lrp",
+        action="store_false",
+        help="Disable LRP backward rules even when --method relp is selected.",
+    )
+    parser.add_argument(
+        "--lrp-rules",
+        type=str,
+        default="LN-rule,AH-rule,Half-rule",
+        help="Comma-separated LRP rules to apply. Default: LN-rule,AH-rule,Half-rule.",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--output-dir", type=str, default="results")
@@ -129,10 +171,19 @@ def parse_args() -> argparse.Namespace:
              "When set, replaces top-K percentage logic. Works with cached scores.",
     )
     parser.add_argument(
+        "--score-filter",
+        type=float,
+        default=None,
+        dest="score_filter",
+        help="Score-filter threshold τ: selects components where score_v ≥ τ·m(M,x), "
+             "m(M,x) = sum of top-5 clean logits at the last prompt position. "
+             "Gives variable-size circuits per example. Typical value: 0.005.",
+    )
+    parser.add_argument(
         "--granularity",
         type=str,
         default="head_mlp",
-        choices=["head_mlp", "neuron", "block"],
+        choices=["head_mlp", "neuron"],
         help="Node granularity for circuit extraction (default: head_mlp).",
     )
     parser.add_argument(
@@ -162,16 +213,14 @@ def _enumerate_all_components(model, granularity="head_mlp", method="eap"):
     n_heads = model.cfg.n_heads
     comps = []
     for layer in range(n_layers):
-        if granularity == "block":
-            comps.append(Component(layer=layer, kind="attn_block", index=0))
-        else:
-            for h in range(n_heads):
-                comps.append(Component(layer=layer, kind="head", index=h))
-        if method == "neuron_attr":
+        if granularity == "neuron":
+            # Arora et al.: MLP neurons only at neuron granularity
             for i in range(model.cfg.d_mlp):
                 comps.append(Component(layer=layer, kind="neuron", index=i))
-        else:
-            comps.append(Component(layer=layer, kind="mlp", index=0))
+            continue
+        for h in range(n_heads):
+            comps.append(Component(layer=layer, kind="head", index=h))
+        comps.append(Component(layer=layer, kind="mlp", index=0))
     return comps
 
 
@@ -220,6 +269,29 @@ def _build_threshold_example_sets(per_example_scores: List[Dict[Component, float
         cutoff = tau * total
         sets.append({c for c, v in sc.items() if abs(v) >= cutoff})
     return sets
+
+
+def _compute_m_values(model, examples: List, device: str, top_k: int = 5) -> List[float]:
+    """Compute m(M,x) = sum of top-k logits at last prompt position for score-filter thresholding."""
+    model.eval()
+    m_values = []
+    with torch.inference_mode():
+        for ex in examples:
+            tokens = model.to_tokens(ex.prompt, prepend_bos=True).to(device)
+            logits = model(tokens)
+            m_x = float(logits[0, -1].topk(top_k).values.sum().item())
+            m_values.append(m_x)
+    return m_values
+
+
+def _build_score_filter_example_sets(
+    per_example_scores: List[Dict[Component, float]], m_values: List[float], tau: float
+) -> List[set]:
+    """Select v where score_v >= tau * m(M,x) per example."""
+    return [
+        {c for c, v in sc.items() if v >= tau * m_x}
+        for sc, m_x in zip(per_example_scores, m_values)
+    ]
 
 
 def _count_components(example_sets: List[set]) -> Dict[Component, int]:
@@ -341,6 +413,11 @@ def _run_single_combination(
     score_threshold: float | None = None,
     max_prompt_chars: int | None = None,
     parity: bool = False,
+    use_lrp: bool | None = None,
+    lrp_rules: List[str] | None = None,
+    score_filter: float | None = None,
+    ig_steps: int = 5,
+    task_metric: str = "logprob",
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -365,13 +442,21 @@ def _run_single_combination(
     # Check for cached attributions
     cache_dir.mkdir(parents=True, exist_ok=True)
     digits_str = str(digits) if (digits is not None and task == "addition") else "na"
+    # Include granularity in the cache key so runs at different granularities
+    # under the same method (e.g. relp head_mlp vs relp neuron) don't clobber.
+    # Omit it for head_mlp to stay backward-compatible with pre-RelP caches.
+    gran_suffix = "" if granularity == "head_mlp" else f"__g{granularity}"
+    method_suffix = f"{method}__ig{ig_steps}" if method == "eap_ig" else method
+    metric_suffix = "" if task_metric == "logprob" else f"__tm{task_metric}"
     attrib_name = (
-        f"{model_name.replace('/', '_')}__{hf_revision or 'none'}__{task}__{method}__"
+        f"{model_name.replace('/', '_')}__{hf_revision or 'none'}__{task}__{method_suffix}{metric_suffix}{gran_suffix}__"
         f"n{num_examples}__d{digits_str}__s{seed}.jsonl"
     )
     attrib_path = cache_dir / attrib_name
 
-    combo_key_root = f"{model_name}|{hf_revision or 'none'}|{task}|{method}|n{num_examples}|d{digits}"
+    combo_key_root = (
+        f"{model_name}|{hf_revision or 'none'}|{task}|{method_suffix}|tm{task_metric}|n{num_examples}|d{digits}"
+    )
     start = end = None
 
     # Decide whether to load from cache or extract anew
@@ -397,7 +482,15 @@ def _run_single_combination(
                 print(f"[CACHE] Loaded cached attributions from {attrib_path}")
         else:
             # Perform extraction
-            extractor = CircuitExtractor(model, method=method, granularity=granularity)
+            extractor = CircuitExtractor(
+                model,
+                method=method,
+                granularity=granularity,
+                task_metric=task_metric,
+                use_lrp=use_lrp,
+                lrp_rules=lrp_rules,
+                ig_steps=ig_steps,
+            )
             start = time.time()
             try:
                 _, example_scores = extractor.extract_circuits_from_examples(
@@ -441,6 +534,8 @@ def _run_single_combination(
         "num_examples": len(dataset),
         "digits": digits if task == "addition" else None,
         "method": method,
+        "task_metric": task_metric,
+        "ig_steps": int(ig_steps) if method == "eap_ig" else None,
         "top_k_list": list(sorted(set(int(k) for k in top_k_list))),
         "reuse_thresholds": list(sorted(set(int(p) for p in reuse_thresholds))),
         "val_fraction": vf,
@@ -558,6 +653,110 @@ def _run_single_combination(
             per_thresh[str(thr)] = thresh_entry
 
         metrics["by_threshold"] = {str(score_threshold): {"thresholds": per_thresh}}
+
+    # Score-filter mode: score_v >= tau * m(M,x) per example
+    if score_filter is not None:
+        metrics["score_filter"] = score_filter
+        print(f"[SCORE-FILTER] Computing m_x for {len(train_examples)} train examples (top-5 logits)...")
+        m_values = _compute_m_values(model, train_examples, device)
+        sets_tau = _build_score_filter_example_sets(example_scores, m_values, score_filter)
+        avg_circuit_size = sum(len(s) for s in sets_tau) / max(1, len(sets_tau))
+        counts = _count_components(sets_tau)
+        n_ex = len(sets_tau)
+
+        per_thresh = {}
+        for p in metrics["reuse_thresholds"]:
+            thr = max(0, min(100, int(p)))
+            need = int(math.ceil(thr / 100.0 * n_ex))
+            shared = [c for c, cnt in counts.items() if cnt >= need]
+            shared_size = len(shared)
+            reuse_percent = float(min(shared_size, avg_circuit_size) / max(1, avg_circuit_size) * 100.0)
+
+            rng_seed = int(hashlib.md5(f"{combo_key_root}|sf{score_filter}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
+            rng = random.Random(rng_seed)
+            control_removed = _sample_control_components(shared, all_components, rng, parity=parity, ignore_type=ignore_type) if shared_size > 0 else []
+
+            if shared_size > 0:
+                ablation_train_correct, ablation_train_total, ablation_train_preds = evaluate_predictions(
+                    model, train_examples, task=task, removed=shared, verbose=debug
+                )
+            else:
+                ablation_train_correct, ablation_train_total = baseline_train_correct, baseline_train_total
+                ablation_train_preds = [{"is_correct": True}] * len(train_examples)
+            if len(control_removed) > 0:
+                control_train_correct, control_train_total, control_train_preds = evaluate_predictions(
+                    model, train_examples, task=task, removed=control_removed, verbose=debug
+                )
+            else:
+                control_train_correct, control_train_total = baseline_train_correct, baseline_train_total
+                control_train_preds = [{"is_correct": True}] * len(train_examples)
+
+            ablation_train_acc = ablation_train_correct / ablation_train_total if ablation_train_total > 0 else 0.0
+            control_train_acc = control_train_correct / control_train_total if control_train_total > 0 else 0.0
+
+            if val_examples:
+                if shared_size > 0:
+                    ablation_val_correct, ablation_val_total, ablation_val_preds = evaluate_predictions(
+                        model, val_examples, task=task, removed=shared, verbose=debug
+                    )
+                else:
+                    ablation_val_correct, ablation_val_total = baseline_val_correct, baseline_val_total
+                    ablation_val_preds = [{"is_correct": True}] * len(val_examples)
+                if len(control_removed) > 0:
+                    control_val_correct, control_val_total, control_val_preds = evaluate_predictions(
+                        model, val_examples, task=task, removed=control_removed, verbose=debug
+                    )
+                else:
+                    control_val_correct, control_val_total = baseline_val_correct, baseline_val_total
+                    control_val_preds = [{"is_correct": True}] * len(val_examples)
+                ablation_val_acc = ablation_val_correct / ablation_val_total if ablation_val_total > 0 else float("nan")
+                control_val_acc = control_val_correct / control_val_total if control_val_total > 0 else float("nan")
+            else:
+                ablation_val_acc = control_val_acc = float("nan")
+                ablation_val_preds = control_val_preds = []
+
+            shared_flags_train = [1 if r.get("is_correct") else 0 for r in ablation_train_preds]
+            control_flags_train = [1 if r.get("is_correct") else 0 for r in control_train_preds]
+            perm_train = _permutation_test(
+                shared_flags_train, control_flags_train, trials=int(perm_trials), rng=random.Random(rng_seed + 1)
+            ) if len(shared_flags_train) == len(control_flags_train) else {"p_value": 1.0, "obs_diff": 0.0, "trials": 0}
+
+            if val_examples:
+                shared_flags_val = [1 if r.get("is_correct") else 0 for r in ablation_val_preds]
+                control_flags_val = [1 if r.get("is_correct") else 0 for r in control_val_preds]
+                perm_val = _permutation_test(
+                    shared_flags_val, control_flags_val, trials=int(perm_trials), rng=random.Random(rng_seed + 2)
+                ) if len(shared_flags_val) == len(control_flags_val) else {"p_value": 1.0, "obs_diff": 0.0, "trials": 0}
+            else:
+                perm_val = {"p_value": float("nan"), "obs_diff": float("nan"), "trials": 0}
+
+            thresh_entry = {
+                "threshold": thr,
+                "shared_circuit_size": shared_size,
+                "avg_circuit_size": avg_circuit_size,
+                "reuse_percent": reuse_percent,
+                "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
+                "rng_seed": rng_seed,
+                "train": {
+                    "ablation_accuracy": ablation_train_acc,
+                    "control_accuracy": control_train_acc,
+                    "accuracy_drop_ablation": baseline_train_acc - ablation_train_acc,
+                    "accuracy_drop_control": baseline_train_acc - control_train_acc,
+                    "knockout_diff": _safe_div(baseline_train_acc - ablation_train_acc, baseline_train_acc - control_train_acc),
+                    "permutation": perm_train,
+                },
+                "val": {
+                    "ablation_accuracy": ablation_val_acc,
+                    "control_accuracy": control_val_acc,
+                    "accuracy_drop_ablation": (baseline_val_acc - ablation_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "accuracy_drop_control": (baseline_val_acc - control_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "knockout_diff": _safe_div(baseline_val_acc - ablation_val_acc, baseline_val_acc - control_val_acc) if not math.isnan(baseline_val_acc) else float("nan"),
+                    "permutation": perm_val,
+                },
+            }
+            per_thresh[str(thr)] = thresh_entry
+
+        metrics["by_score_filter"] = {str(score_filter): {"thresholds": per_thresh}}
 
     # Loop over K and thresholds
     for K in metrics["top_k_list"]:
@@ -720,16 +919,33 @@ def main():
         digits = args.digits if args.task == "addition" else None
         top_k_list = _parse_int_list(args.top_k_list)
         reuse_thresholds = _parse_int_list(args.reuse_thresholds)
+        method_suffix = (
+            f"{args.method}__ig{args.ig_steps}" if args.method == "eap_ig" else args.method
+        )
+        metric_suffix = "" if args.task_metric == "logprob" else f"__tm{args.task_metric}"
         combo_name = (
-            f"{args.model_name.replace('/', '_')}__{args.hf_revision or 'main'}__{args.task}__{args.method}__"
+            f"{args.model_name.replace('/', '_')}__{args.hf_revision or 'main'}__{args.task}__{method_suffix}{metric_suffix}__"
             f"n{args.num_examples}__d{digits if args.task=='addition' else 'na'}__Ks{','.join(map(str, top_k_list))}__reuse{','.join(map(str, reuse_thresholds))}"
         )
         run_dir = base_run_dir / combo_name
         results_home_dir = (Path(args.results_home) / base_run_dir.name / combo_name) if args.results_home else None
         print(f"\n[RUN] {combo_name}")
 
-        # neuron_attr forces neuron-level granularity
-        granularity = "head_mlp" if args.method == "neuron_attr" else args.granularity
+        # neuron_attr is a deprecated alias for relp + neuron granularity
+        if args.method == "neuron_attr":
+            print("[DEPRECATED] --method neuron_attr; forwarding to --method relp --granularity neuron")
+            method = "relp"
+            granularity = "neuron"
+        else:
+            method = args.method
+            granularity = args.granularity
+
+        if granularity == "neuron" and method != "relp":
+            raise SystemExit(
+                f"--granularity neuron requires --method relp (got --method {method})"
+            )
+
+        lrp_rules = [r.strip() for r in args.lrp_rules.split(",") if r.strip()]
 
         _run_single_combination(
             model=model,
@@ -744,7 +960,7 @@ def main():
             run_dir=run_dir,
             amp=args.amp,
             val_fraction=args.val_fraction,
-            method=args.method,
+            method=method,
             hf_revision=args.hf_revision,
             perm_trials=args.perm_trials,
             ignore_type=args.ignore_type,
@@ -757,6 +973,11 @@ def main():
             score_threshold=args.score_threshold,
             max_prompt_chars=args.max_prompt_chars,
             parity=args.parity,
+            use_lrp=args.use_lrp,
+            lrp_rules=lrp_rules,
+            score_filter=args.score_filter,
+            ig_steps=args.ig_steps,
+            task_metric=args.task_metric,
         )
     except Exception as e:
         print(f"[FATAL] {e}")

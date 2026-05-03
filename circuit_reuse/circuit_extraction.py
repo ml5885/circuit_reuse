@@ -1,21 +1,22 @@
 from __future__ import annotations
-from typing import Dict, List, Set, Any, Optional, Tuple
+from typing import Dict, List, Set, Any, Optional, Tuple, Callable, Iterable
 from dataclasses import dataclass
+import gc
+
 import torch
 from torch.nn import functional as F
 from transformer_lens import HookedTransformer
 from contextlib import nullcontext
-import gc
-from collections import defaultdict
 
-from .graph import Graph, Granularity, attribute_single_example, make_hooks
+from .graph import Graph, Granularity, attribute_single_example, attribute_single_example_ig
 from .dataset import Example
+from .lrp_patch import DEFAULT_LRP_RULES, enable_lrp, disable_lrp
 
 
 @dataclass(frozen=True)
 class Component:
     layer: int
-    kind: str  # "head", "mlp", "attn_block", or "neuron"
+    kind: str  # "head", "mlp", or "neuron"
     index: int
 
     def __hash__(self) -> int:
@@ -25,44 +26,147 @@ class Component:
         return f"{self.kind}[layer={self.layer}, index={self.index}]"
 
 
+HookTarget = Tuple[str, Callable[[torch.Tensor], Dict[Component, float]]]
+
+
 class CircuitExtractor:
     """
     Extract per-example attribution scores for components.
+
+    Supported methods (`eap` and `eap_ig` use edge-level EAP machinery, `relp` is node-level):
+    - ``eap``: Edge Attribution Patching (Syed et al. 2023). Score =
+      ``(corrupted_act − clean_act) × clean_grad`` on edges, then aggregated per node.
+    - ``eap_ig``: EAP with integrated gradients over the clean↔corrupted input
+      embedding path (Hanna et al. 2024). Uses the same edge graph as ``eap``
+      but averages gradients over ``ig_steps`` interpolation points.
+    - ``relp``: Relevance Patching (Jafari et al. 2025, arXiv:2508.21258) and
+      neuron-basis attribution (Arora et al. 2026, arXiv:2601.22594). Score =
+      ``corrupted_grad × (clean_act − corrupted_act)`` at a single hook per component,
+      with LRP-modified backward rules (``LN-rule``, ``AH-rule``, ``Half-rule``).
+      Works at all granularities; at ``neuron`` granularity it scores MLP neurons
+      only, matching Arora et al.'s neuron-basis circuits.
     """
-    def __init__(self, model: HookedTransformer, method: str = "eap", granularity: Granularity = "head_mlp") -> None:
+
+    def __init__(
+        self,
+        model: HookedTransformer,
+        method: str = "eap",
+        granularity: Granularity = "head_mlp",
+        task_metric: str = "logprob",
+        use_lrp: Optional[bool] = None,
+        lrp_rules: Optional[Iterable[str]] = None,
+        ig_steps: int = 5,
+    ) -> None:
         self.model = model
         self.method = method
         self.granularity = granularity
-        if method == "neuron_attr":
+        self.task_metric = task_metric
+        self.use_lrp = bool(method == "relp") if use_lrp is None else bool(use_lrp)
+        self.lrp_rules = list(lrp_rules) if lrp_rules is not None else list(DEFAULT_LRP_RULES)
+        self.ig_steps = int(ig_steps)
+        if self.task_metric not in ("logprob", "kl"):
+            raise ValueError(f"Unknown task_metric: {self.task_metric}")
+
+        if method in ("eap", "eap_ig"):
+            if granularity == "neuron":
+                raise ValueError(
+                    "granularity='neuron' is only supported with method='relp'. "
+                    "Use --method relp for neuron-level circuits."
+                )
+            self.graph = Graph.from_model(model, granularity=granularity)
+        elif method == "relp":
             self.graph = None
         else:
-            self.graph = Graph.from_model(model, granularity=granularity)
-        # Enable hooks needed for all methods
+            raise ValueError(f"Unknown method: {method}")
+        if self.method == "eap_ig" and self.ig_steps <= 0:
+            raise ValueError(f"ig_steps must be positive for method='eap_ig' (got {self.ig_steps})")
+
+        # Enable TL hooks needed for component-level scoring
         self.model.cfg.use_split_qkv_input = True
         self.model.cfg.use_attn_result = True
         self.model.cfg.use_hook_mlp_in = True
 
+        if self.use_lrp:
+            enable_lrp(model, rules=self.lrp_rules)
+        else:
+            disable_lrp(model)
+
     def _get_metric_fn(self, positions: torch.Tensor, target_ids: torch.Tensor):
-        def metric(logits: torch.Tensor, corrupted_logits: torch.Tensor, input_lengths: torch.Tensor, label: Any) -> torch.Tensor:
-            logprobs = logits.log_softmax(dim=-1)
-            selected = logprobs[0, positions, :].gather(dim=1, index=target_ids.view(-1, 1))
-            return selected.sum()
+        def metric(logits: torch.Tensor, corrupted_logits=None, input_lengths=None, label=None) -> torch.Tensor:
+            logits_slice = logits[0, positions, :]
+            if self.task_metric == "logprob":
+                logprobs = logits_slice.log_softmax(dim=-1)
+                selected = logprobs.gather(dim=1, index=target_ids.view(-1, 1))
+                return selected.sum()
+            if corrupted_logits is None:
+                raise ValueError("task_metric='kl' requires reference logits")
+            ref_slice = corrupted_logits[0, positions, :]
+            log_probs = F.log_softmax(logits_slice, dim=-1)
+            ref_probs = F.softmax(ref_slice, dim=-1)
+            return F.kl_div(log_probs, ref_probs, reduction="batchmean")
         return metric
 
+    def _prepare_paired_inputs(self, example: Example):
+        """Tokenize clean and corrupted, pad to the same length, build metric fn."""
+        device = self.model.cfg.device
+        prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
+        clean_full = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
+        corrupted_full = self.model.to_tokens(
+            example.corrupted_prompt + example.corrupted_target, prepend_bos=True
+        )
+
+        p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
+        lcp = 0
+        while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
+            lcp += 1
+        gold_ids_list = (
+            f_ids[lcp:] if lcp < len(f_ids)
+            else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
+        )
+        target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
+        prompt_len = prompt_tok.shape[1]
+        positions = torch.arange(
+            prompt_len - 1, prompt_len - 1 + len(gold_ids_list), device=device, dtype=torch.long
+        )
+
+        pad_id = (
+            self.model.tokenizer.pad_token_id
+            if self.model.tokenizer.pad_token_id is not None
+            else self.model.tokenizer.eos_token_id
+        )
+        max_len = max(clean_full.shape[1], corrupted_full.shape[1])
+        clean_len = clean_full.shape[1]
+        corrupted_len = corrupted_full.shape[1]
+        clean_tokens = F.pad(clean_full, (0, max_len - clean_full.shape[1]), "constant", pad_id).to(device)
+        corrupted_tokens = F.pad(
+            corrupted_full, (0, max_len - corrupted_full.shape[1]), "constant", pad_id
+        ).to(device)
+        clean_attention_mask = torch.zeros((1, max_len), device=device, dtype=torch.long)
+        clean_attention_mask[:, :clean_len] = 1
+        corrupted_attention_mask = torch.zeros((1, max_len), device=device, dtype=torch.long)
+        corrupted_attention_mask[:, :corrupted_len] = 1
+
+        metric = self._get_metric_fn(positions=positions, target_ids=target_ids)
+        return (
+            clean_tokens,
+            corrupted_tokens,
+            clean_attention_mask,
+            corrupted_attention_mask,
+            metric,
+            max_len,
+        )
+
+    # --- EAP edge-level machinery ------------------------------------------
+
     def _scores_to_components(self, scores: torch.Tensor) -> Dict[Component, float]:
-        """Convert raw scores to a mapping from Component to score."""
-        from .graph import InputNode, MLPNode, AttentionNode, AttentionBlockNode
+        from .graph import InputNode, MLPNode, AttentionNode
         component_scores: Dict[Component, float] = {}
         per_component_scores = scores.abs().sum(dim=1)
-
         for fwd_idx, score in enumerate(per_component_scores.tolist()):
             node = self.graph.idx_to_forward_node.get(fwd_idx)
             if node is None or isinstance(node, InputNode):
                 continue
-
-            if isinstance(node, AttentionBlockNode):
-                comp = Component(layer=node.layer, kind="attn_block", index=0)
-            elif isinstance(node, AttentionNode):
+            if isinstance(node, AttentionNode):
                 comp = Component(layer=node.layer, kind="head", index=node.head)
             elif isinstance(node, MLPNode):
                 comp = Component(layer=node.layer, kind="mlp", index=0)
@@ -71,195 +175,159 @@ class CircuitExtractor:
             component_scores[comp] = float(score)
         return component_scores
 
-    def _prepare_eap_inputs(self, example: Example):
-        prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
-        clean_full_tok = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
-        corrupted_full_tok = self.model.to_tokens(example.corrupted_prompt + example.corrupted_target, prepend_bos=True)
+    # --- RelP node-level machinery ------------------------------------------
 
-        device = self.model.cfg.device
-        p_ids, f_ids = prompt_tok.tolist()[0], clean_full_tok.tolist()[0]
-        lcp = 0
-        while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
-            lcp += 1
-        gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
-        target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
-        prompt_len = prompt_tok.shape[1]
-        positions = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), device=device, dtype=torch.long)
-        max_len = max(clean_full_tok.shape[1], corrupted_full_tok.shape[1])
-        pad_token = self.model.tokenizer.pad_token_id if self.model.tokenizer.pad_token_id is not None else self.model.tokenizer.eos_token_id
+    def _hook_targets(self) -> List[HookTarget]:
+        """Return a list of (hook_name, scorer) pairs for the current granularity.
 
-        clean_tokens = F.pad(clean_full_tok, (0, max_len - clean_full_tok.shape[1]), "constant", pad_token).to(device)
-        corrupted_tokens = F.pad(corrupted_full_tok, (0, max_len - corrupted_full_tok.shape[1]), "constant", pad_token).to(device)
-
-        metric = self._get_metric_fn(positions=positions, target_ids=target_ids)
-        return clean_tokens, corrupted_tokens, metric, max_len
-
-    def _prepare_gradient_inputs(self, example: Example):
-        prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
-        clean_full_tok = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
-
-        device = self.model.cfg.device
-        p_ids, f_ids = prompt_tok.tolist()[0], clean_full_tok.tolist()[0]
-        lcp = 0
-        while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
-            lcp += 1
-
-        gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
-        target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
-        prompt_len = prompt_tok.shape[1]
-        positions = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), device=device, dtype=torch.long)
-        metric = self._get_metric_fn(positions=positions, target_ids=target_ids)
-        return clean_full_tok.to(device), metric, clean_full_tok.shape[1]
-
-    def _extract_neuron_attr(self, example: Example, device: str, autocast_ctx) -> Dict[Component, float]:
-        """Node-level attribution: activation_diff × gradient for neurons and heads.
-
-        Following Arora et al. ("Language Model Circuits Are Sparse in the Neuron Basis"),
-        scores each MLP neuron and attention head by the dot product of the
-        activation difference (corrupted - clean) and the gradient of the metric
-        w.r.t. that activation, summed over sequence positions.
+        Each scorer takes an attribution tensor `grad * (clean - corrupted)` at that
+        hook and returns a ``{Component: score}`` dict.
         """
-        cfg = self.model.cfg
-        n_layers, n_heads, d_mlp = cfg.n_layers, cfg.n_heads, cfg.d_mlp
+        n_layers = self.model.cfg.n_layers
+        n_heads = self.model.cfg.n_heads
+        d_mlp = self.model.cfg.d_mlp
 
-        # Tokenize
-        clean_full = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
-        corrupted_full = self.model.to_tokens(example.corrupted_prompt + example.corrupted_target, prepend_bos=True)
-        prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
+        targets: List[HookTarget] = []
+        if self.granularity == "neuron":
+            # Arora et al.: MLP neurons only, scored at hook_post
+            for layer in range(n_layers):
+                name = f"blocks.{layer}.mlp.hook_post"
+                targets.append((name, _make_neuron_scorer(layer, d_mlp)))
+        else:  # head_mlp
+            for layer in range(n_layers):
+                targets.append(
+                    (f"blocks.{layer}.attn.hook_z", _make_head_scorer(layer, n_heads))
+                )
+                targets.append(
+                    (f"blocks.{layer}.hook_mlp_out", _make_mlp_scorer(layer))
+                )
+        return targets
 
-        p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
-        lcp = 0
-        for a, b in zip(p_ids, f_ids):
-            if a == b:
-                lcp += 1
-            else:
-                break
-        gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
-        prompt_len = prompt_tok.shape[1]
-        positions = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), device=device, dtype=torch.long)
-        target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
-        metric_fn = self._get_metric_fn(positions=positions, target_ids=target_ids)
+    def _extract_relp_example(
+        self, example: Example, device: str, autocast_ctx, hook_targets: List[HookTarget]
+    ) -> Dict[Component, float]:
+        """Run two forwards + one backward with Jafari's RelP formula.
 
-        pad_id = self.model.tokenizer.pad_token_id if self.model.tokenizer.pad_token_id is not None else self.model.tokenizer.eos_token_id
-        max_len = max(clean_full.shape[1], corrupted_full.shape[1])
-        clean_tokens = F.pad(clean_full, (0, max_len - clean_full.shape[1]), "constant", pad_id).to(device)
-        corrupted_tokens = F.pad(corrupted_full, (0, max_len - corrupted_full.shape[1]), "constant", pad_id).to(device)
+        Score = corrupted_grad × (clean_act − corrupted_act), aggregated per component.
+        """
+        (
+            clean_tokens,
+            corrupted_tokens,
+            clean_attention_mask,
+            corrupted_attention_mask,
+            metric,
+            _max_len,
+        ) = self._prepare_paired_inputs(example)
 
-        # Step 1: corrupted forward pass — save activations
-        corrupted_acts: Dict[str, torch.Tensor] = {}
+        hook_names = [name for name, _ in hook_targets]
 
-        def save_corrupted(name):
-            def hook(act, hook=None):
-                corrupted_acts[name] = act.detach()
-                return act
-            return hook
-
-        corrupted_hooks = []
-        for layer in range(n_layers):
-            corrupted_hooks.append((f"blocks.{layer}.mlp.hook_post", save_corrupted(f"mlp.{layer}")))
-            corrupted_hooks.append((f"blocks.{layer}.attn.hook_result", save_corrupted(f"attn.{layer}")))
-
-        with torch.inference_mode():
-            with self.model.hooks(fwd_hooks=corrupted_hooks):
-                self.model(corrupted_tokens)
-        self.model.reset_hooks()
-
-        # Step 2+3: clean forward + backward — compute activation_diff and capture gradients
-        clean_acts: Dict[str, torch.Tensor] = {}
-        gradients: Dict[str, torch.Tensor] = {}
-
-        def save_clean_and_grad(name):
+        def _make_fwd_cache_hook(store: Dict[str, torch.Tensor], name: str):
             def fwd_hook(act, hook=None):
-                act.retain_grad()
-                clean_acts[name] = act
-                return act
+                store[name] = act.detach()
             return fwd_hook
 
-        def save_grad(name):
-            def bwd_hook(act, hook=None):
-                gradients[name] = act.detach()
-                return act
+        def _make_bwd_cache_hook(store: Dict[str, torch.Tensor], name: str):
+            def bwd_hook(grad, hook=None):
+                store[name] = grad.detach()
             return bwd_hook
 
-        fwd_hooks = []
-        bwd_hooks = []
-        for layer in range(n_layers):
-            fwd_hooks.append((f"blocks.{layer}.mlp.hook_post", save_clean_and_grad(f"mlp.{layer}")))
-            fwd_hooks.append((f"blocks.{layer}.attn.hook_result", save_clean_and_grad(f"attn.{layer}")))
-            bwd_hooks.append((f"blocks.{layer}.mlp.hook_post", save_grad(f"mlp.{layer}")))
-            bwd_hooks.append((f"blocks.{layer}.attn.hook_result", save_grad(f"attn.{layer}")))
+        # Clean forward — cache activations (no grad).
+        clean_cache: Dict[str, torch.Tensor] = {}
+        with torch.inference_mode():
+            fwd = [(n, _make_fwd_cache_hook(clean_cache, n)) for n in hook_names]
+            with self.model.hooks(fwd_hooks=fwd):
+                clean_logits = self.model(clean_tokens, attention_mask=clean_attention_mask)
+        self.model.reset_hooks()
+
+        # Corrupted forward + backward — cache activations and gradients.
+        corrupted_cache: Dict[str, torch.Tensor] = {}
+        grad_cache: Dict[str, torch.Tensor] = {}
+
+        fwd = [(n, _make_fwd_cache_hook(corrupted_cache, n)) for n in hook_names]
+        bwd = [(n, _make_bwd_cache_hook(grad_cache, n)) for n in hook_names]
 
         with autocast_ctx:
-            with self.model.hooks(fwd_hooks=fwd_hooks, bwd_hooks=bwd_hooks):
-                logits = self.model(clean_tokens)
-                loss = metric_fn(logits, None, None, None)
+            with self.model.hooks(fwd_hooks=fwd, bwd_hooks=bwd):
+                logits = self.model(corrupted_tokens, attention_mask=corrupted_attention_mask)
+                loss = metric(logits, clean_logits)
                 loss.backward()
-
         self.model.zero_grad(set_to_none=True)
         self.model.reset_hooks()
 
-        # Step 4+5: compute per-component scores
-        component_scores: Dict[Component, float] = {}
-        for layer in range(n_layers):
-            mlp_key = f"mlp.{layer}"
-            if mlp_key in clean_acts and mlp_key in corrupted_acts and mlp_key in gradients:
-                act_diff = corrupted_acts[mlp_key] - clean_acts[mlp_key].detach()  # [batch, seq, d_mlp]
-                grad = gradients[mlp_key]  # [batch, seq, d_mlp]
-                # Per-neuron: sum over batch and positions
-                neuron_scores = (act_diff * grad).sum(dim=(0, 1))  # [d_mlp]
-                for i in range(d_mlp):
-                    component_scores[Component(layer=layer, kind="neuron", index=i)] = float(neuron_scores[i].abs().item())
+        comp_scores: Dict[Component, float] = {}
+        for name, scorer in hook_targets:
+            if name not in grad_cache or name not in clean_cache or name not in corrupted_cache:
+                continue
+            clean_a = clean_cache[name]
+            corr_a = corrupted_cache[name]
+            grad = grad_cache[name]
+            # Safety for rare shape mismatches across padded/unpadded paths.
+            if clean_a.shape != corr_a.shape:
+                min_len = min(clean_a.shape[1], corr_a.shape[1])
+                clean_a = clean_a[:, :min_len]
+                corr_a = corr_a[:, :min_len]
+                grad = grad[:, :min_len]
+            attr = grad * (clean_a - corr_a)
+            comp_scores.update(scorer(attr))
 
-            attn_key = f"attn.{layer}"
-            if attn_key in clean_acts and attn_key in corrupted_acts and attn_key in gradients:
-                act_diff = corrupted_acts[attn_key] - clean_acts[attn_key].detach()  # [batch, seq, n_heads, d_head]
-                grad = gradients[attn_key]
-                # Per-head: sum over batch, positions, and d_head
-                head_scores = (act_diff * grad).sum(dim=(0, 1, 3))  # [n_heads]
-                for h in range(n_heads):
-                    component_scores[Component(layer=layer, kind="head", index=h)] = float(head_scores[h].abs().item())
+        return comp_scores
 
-        return component_scores
+    # --- Unified entry point ------------------------------------------------
 
     def extract_circuits_from_examples(
         self, examples: List[Example], task_name: str, amp: bool, device: str
     ) -> Tuple[List[Set[Component]], List[Dict[Component, float]]]:
-        autocast_ctx = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-                        if amp and device.startswith("cuda") else nullcontext())
+        autocast_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if amp and device.startswith("cuda")
+            else nullcontext()
+        )
 
+        if self.method == "relp":
+            return self._extract_relp(examples, task_name, device, autocast_ctx)
+        return self._extract_edge_graph(examples, task_name, device, autocast_ctx)
+
+    def _extract_relp(
+        self, examples: List[Example], task_name: str, device: str, autocast_ctx
+    ) -> Tuple[List[Set[Component]], List[Dict[Component, float]]]:
+        circuits: List[Set[Component]] = []
+        per_example_scores: List[Dict[Component, float]] = []
+        hook_targets = self._hook_targets()
+        n_skipped = 0
+
+        for idx, ex in enumerate(examples):
+            try:
+                comp_scores = self._extract_relp_example(ex, device, autocast_ctx, hook_targets)
+            except torch.cuda.OutOfMemoryError:
+                n_skipped += 1
+                self.model.zero_grad(set_to_none=True)
+                self.model.reset_hooks()
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[OOM] Skipping example {idx}")
+                continue
+
+            per_example_scores.append(comp_scores)
+            items = sorted(comp_scores.items(), key=lambda x: x[1], reverse=True)
+            circuits.append({c for c, _ in items})
+
+            if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
+                print(
+                    f"[{task_name}] (relp/{self.granularity}) "
+                    f"{idx + 1}/{len(examples)} examples processed"
+                )
+            torch.cuda.empty_cache()
+
+        if n_skipped:
+            print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
+        return circuits, per_example_scores
+
+    def _extract_edge_graph(
+        self, examples: List[Example], task_name: str, device: str, autocast_ctx
+    ) -> Tuple[List[Set[Component]], List[Dict[Component, float]]]:
         circuits: List[Set[Component]] = []
         per_example_scores: List[Dict[Component, float]] = []
 
-        if self.method == "neuron_attr":
-            n_skipped = 0
-            for idx, ex in enumerate(examples):
-                try:
-                    component_scores = self._extract_neuron_attr(ex, device, autocast_ctx)
-                except torch.cuda.OutOfMemoryError:
-                    n_skipped += 1
-                    self.model.zero_grad(set_to_none=True)
-                    self.model.reset_hooks()
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    print(f"[OOM] Skipping example {idx}")
-                    continue
-
-                per_example_scores.append(component_scores)
-                items = sorted(component_scores.items(), key=lambda x: x[1], reverse=True)
-                circuits.append({c for c, _ in items})
-
-                if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
-                    print(f"[{task_name}] (neuron_attr) {idx + 1}/{len(examples)} examples processed")
-
-                torch.cuda.empty_cache()
-
-            if n_skipped:
-                print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
-            return circuits, per_example_scores
-
-        # Lazily-allocated work buffer — sized to current example, re-allocated
-        # only when a longer example is seen.  This avoids a single outlier
-        # sequence forcing an allocation that OOMs on memory-constrained GPUs.
         work_buf: torch.Tensor | None = None
         work_buf_seq_len = 0
 
@@ -275,99 +343,72 @@ class CircuitExtractor:
                 work_buf_seq_len = seq_len
             return work_buf
 
-        # Stream examples to GPU one by one
         n_skipped = 0
         for idx, ex in enumerate(examples):
-          try:
-            if self.method == "eap":
-                prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
-                clean_full = self.model.to_tokens(ex.prompt + ex.target, prepend_bos=True)
-                corrupted_full = self.model.to_tokens(ex.corrupted_prompt + ex.corrupted_target, prepend_bos=True)
+            try:
+                if self.method == "eap":
+                    (
+                        clean_tokens,
+                        corrupted_tokens,
+                        clean_attention_mask,
+                        corrupted_attention_mask,
+                        metric,
+                        ex_len,
+                    ) = self._prepare_paired_inputs(ex)
+                    with autocast_ctx:
+                        scores = attribute_single_example(
+                            model=self.model, graph=self.graph, metric=metric,
+                            clean_tokens=clean_tokens, corrupted_tokens=corrupted_tokens,
+                            activation_difference=_get_work_buf(ex_len),
+                            clean_attention_mask=clean_attention_mask,
+                            corrupted_attention_mask=corrupted_attention_mask,
+                        )
+                elif self.method == "eap_ig":
+                    (
+                        clean_tokens,
+                        corrupted_tokens,
+                        clean_attention_mask,
+                        corrupted_attention_mask,
+                        metric,
+                        ex_len,
+                    ) = self._prepare_paired_inputs(ex)
+                    with autocast_ctx:
+                        scores = attribute_single_example_ig(
+                            model=self.model,
+                            graph=self.graph,
+                            metric=metric,
+                            clean_tokens=clean_tokens,
+                            corrupted_tokens=corrupted_tokens,
+                            activation_difference=_get_work_buf(ex_len),
+                            steps=self.ig_steps,
+                            clean_attention_mask=clean_attention_mask,
+                            corrupted_attention_mask=corrupted_attention_mask,
+                        )
+                else:
+                    raise ValueError(f"Unknown edge-graph method: {self.method}")
+            except torch.cuda.OutOfMemoryError:
+                n_skipped += 1
+                self.model.zero_grad(set_to_none=True)
+                self.model.reset_hooks()
+                work_buf = None
+                work_buf_seq_len = 0
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[OOM] Skipping example {idx} (seq_len too large for available VRAM)")
+                continue
 
-                p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
-                lcp = 0
-                for a, b in zip(p_ids, f_ids):
-                    if a == b: lcp += 1
-                    else: break
-                gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(ex.target, prepend_bos=False).tolist()[0]
-                prompt_len = prompt_tok.shape[1]
-                pos_cpu = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), dtype=torch.long)
+            comp_scores = self._scores_to_components(scores)
+            per_example_scores.append(comp_scores)
+            items = sorted(comp_scores.items(), key=lambda x: x[1], reverse=True)
+            comp_set = {c for c, _ in items}
+            circuits.append(comp_set)
 
-                pad_id = self.model.tokenizer.pad_token_id if self.model.tokenizer.pad_token_id is not None else self.model.tokenizer.eos_token_id
-                ex_len = max(clean_full.shape[1], corrupted_full.shape[1])
-                clean_pad = F.pad(clean_full, (0, ex_len - clean_full.shape[1]), "constant", pad_id)
-                corrupt_pad = F.pad(corrupted_full, (0, ex_len - corrupted_full.shape[1]), "constant", pad_id)
-
-                clean_tokens = clean_pad.to(device)
-                corrupted_tokens = corrupt_pad.to(device)
-                positions = pos_cpu.to(device)
-                target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
-                metric = self._get_metric_fn(positions=positions, target_ids=target_ids)
-
-                with autocast_ctx:
-                    scores = attribute_single_example(
-                        model=self.model, graph=self.graph, metric=metric,
-                        clean_tokens=clean_tokens, corrupted_tokens=corrupted_tokens,
-                        activation_difference=_get_work_buf(ex_len),
-                    )
-
-            else:  # gradient method
-                clean_full = self.model.to_tokens(ex.prompt + ex.target, prepend_bos=True)
-                prompt_tok = self.model.to_tokens(ex.prompt, prepend_bos=True)
-
-                p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
-                lcp = 0
-                for a, b in zip(p_ids, f_ids):
-                    if a == b: lcp += 1
-                    else: break
-                gold_ids_list = f_ids[lcp:] if lcp < len(f_ids) else self.model.to_tokens(ex.target, prepend_bos=False).tolist()[0]
-                prompt_len = prompt_tok.shape[1]
-                positions = torch.arange(prompt_len - 1, prompt_len - 1 + len(gold_ids_list), dtype=torch.long)
-                target_ids = torch.tensor(gold_ids_list, dtype=torch.long)
-
-                # per-example reusable tensors on GPU
-                seq_len = int(clean_full.shape[1])
-                scores = torch.zeros((self.graph.n_forward, self.graph.n_backward),
-                                    device=self.model.cfg.device, dtype=self.model.cfg.dtype)
-                buf = _get_work_buf(seq_len)
-                buf.zero_()
-
-                with autocast_ctx:
-                    _, fwd_hooks_clean, bwd_hooks = make_hooks(self.model, self.graph, buf, scores)
-                    metric = self._get_metric_fn(positions=positions.to(device), target_ids=target_ids.to(device))
-                    with self.model.hooks(fwd_hooks=fwd_hooks_clean, bwd_hooks=bwd_hooks):
-                        logits = self.model(clean_full.to(device))
-                        metric(logits, None, None, None).backward()
-                    self.model.zero_grad(set_to_none=True)
-                    self.model.reset_hooks()
-                    scores = scores.cpu()
-
-          except torch.cuda.OutOfMemoryError:
-            n_skipped += 1
-            self.model.zero_grad(set_to_none=True)
-            self.model.reset_hooks()
-            # Shrink the work_buf back so the failed size doesn't persist
-            work_buf = None
-            work_buf_seq_len = 0
-            gc.collect()
+            if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
+                print(
+                    f"[{task_name}] ({self.method}) {idx + 1}/{len(examples)} "
+                    f"examples processed (last circuit size={len(comp_set)})"
+                )
             torch.cuda.empty_cache()
-            print(f"[OOM] Skipping example {idx} (seq_len too large for available VRAM)")
-            continue
-
-          component_scores = self._scores_to_components(scores)
-          per_example_scores.append(component_scores)
-          items = sorted(component_scores.items(), key=lambda x: x[1], reverse=True)
-          comp_set = {c for c, _ in items}
-          circuits.append(comp_set)
-
-          if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
-              print(f"[{task_name}] ({self.method}) {idx + 1}/{len(examples)} examples processed (last circuit size={len(comp_set)})")
-
-          if self.method == "eap":
-              del clean_tokens, corrupted_tokens, positions, target_ids, scores
-          else:
-              del clean_full, prompt_tok, positions, target_ids, scores
-          torch.cuda.empty_cache()
 
         if n_skipped:
             print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
@@ -376,5 +417,40 @@ class CircuitExtractor:
         gc.collect()
         torch.cuda.empty_cache()
         return circuits, per_example_scores
+
+
+# --- Per-granularity scorers --------------------------------------------------
+
+def _make_neuron_scorer(layer: int, d_mlp: int):
+    def scorer(attr: torch.Tensor) -> Dict[Component, float]:
+        # attr: [batch, pos, d_mlp] — sum over batch, pos, keep sign
+        per_neuron = attr.sum(dim=(0, 1))  # [d_mlp]
+        out: Dict[Component, float] = {}
+        vals = per_neuron.tolist()
+        for i in range(d_mlp):
+            out[Component(layer=layer, kind="neuron", index=i)] = float(vals[i])
+        return out
+    return scorer
+
+
+def _make_head_scorer(layer: int, n_heads: int):
+    def scorer(attr: torch.Tensor) -> Dict[Component, float]:
+        # attr: [batch, pos, head, d_head]; sum over batch, pos, d_head
+        per_head = attr.sum(dim=(0, 1, -1))  # [n_heads]
+        out: Dict[Component, float] = {}
+        vals = per_head.tolist()
+        for h in range(n_heads):
+            out[Component(layer=layer, kind="head", index=h)] = float(vals[h])
+        return out
+    return scorer
+
+
+def _make_mlp_scorer(layer: int):
+    def scorer(attr: torch.Tensor) -> Dict[Component, float]:
+        # attr: [batch, pos, d_model]; one scalar per layer
+        score = float(attr.sum().item())
+        return {Component(layer=layer, kind="mlp", index=0): score}
+    return scorer
+
 
 __all__ = ["Component", "CircuitExtractor"]

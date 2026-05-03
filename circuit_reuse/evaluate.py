@@ -33,7 +33,10 @@ def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, calla
         def hook_heads(act, hook=None, idx=idx):
             act[:, :, idx, :] = 0.0
             return act
-        hooks.append((f"blocks.{layer}.attn.hook_result", hook_heads))
+        # Use hook_z (always wired into downstream computation) instead of
+        # hook_result — the latter is observe-only unless cfg.use_attn_result
+        # is set True before the model runs, which not all callers do.
+        hooks.append((f"blocks.{layer}.attn.hook_z", hook_heads))
 
     for layer in mlp_layers:
         def hook_mlp(act, hook=None):
