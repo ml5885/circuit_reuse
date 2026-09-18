@@ -54,6 +54,201 @@ def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, calla
     return hooks
 
 
+def compute_corrupted_means(
+    model: Any,
+    dataset: Iterable[Example],
+    layers: Optional[Iterable[int]] = None,
+) -> Dict[str, "torch.Tensor"]:
+    """Compute mean activations of attention heads and MLP layers over the
+    corrupted version of the given dataset.
+
+    Following Wang et al. 2022 and Miller et al. 2024, means are computed on
+    a corrupted distribution so the replaced activation stays on-distribution
+    but no longer carries example-specific information.
+
+    Returns a dict with keys::
+        f"z_L{layer}"        -> Tensor of shape (n_heads, d_head)
+        f"mlp_out_L{layer}"  -> Tensor of shape (d_model,)
+
+    Means are accumulated across (batch, sequence_position), so the same
+    scalar mean is broadcast across every token position at ablation time.
+    """
+    n_layers = model.cfg.n_layers
+    if layers is None:
+        layers = range(n_layers)
+    layer_set = set(int(l) for l in layers)
+
+    head_sums: Dict[int, torch.Tensor] = {}
+    head_counts: Dict[int, int] = {}
+    mlp_sums: Dict[int, torch.Tensor] = {}
+    mlp_counts: Dict[int, int] = {}
+    neuron_sums: Dict[int, torch.Tensor] = {}
+    neuron_counts: Dict[int, int] = {}
+
+    def make_head_hook(layer):
+        def hook(act, hook=None, layer=layer):
+            flat = act.reshape(-1, act.shape[-2], act.shape[-1])
+            s = flat.sum(dim=0)
+            if layer not in head_sums:
+                head_sums[layer] = s.detach().clone().float()
+                head_counts[layer] = flat.shape[0]
+            else:
+                head_sums[layer] += s.detach().float()
+                head_counts[layer] += flat.shape[0]
+            return act
+        return hook
+
+    def make_mlp_hook(layer):
+        def hook(act, hook=None, layer=layer):
+            flat = act.reshape(-1, act.shape[-1])
+            s = flat.sum(dim=0)
+            if layer not in mlp_sums:
+                mlp_sums[layer] = s.detach().clone().float()
+                mlp_counts[layer] = flat.shape[0]
+            else:
+                mlp_sums[layer] += s.detach().float()
+                mlp_counts[layer] += flat.shape[0]
+            return act
+        return hook
+
+    def make_neuron_hook(layer):
+        def hook(act, hook=None, layer=layer):
+            flat = act.reshape(-1, act.shape[-1])
+            s = flat.sum(dim=0)
+            if layer not in neuron_sums:
+                neuron_sums[layer] = s.detach().clone().float()
+                neuron_counts[layer] = flat.shape[0]
+            else:
+                neuron_sums[layer] += s.detach().float()
+                neuron_counts[layer] += flat.shape[0]
+            return act
+        return hook
+
+    hooks: List[Tuple[str, callable]] = []
+    for layer in layer_set:
+        hooks.append((f"blocks.{layer}.attn.hook_z", make_head_hook(layer)))
+        hooks.append((f"blocks.{layer}.hook_mlp_out", make_mlp_hook(layer)))
+        hooks.append((f"blocks.{layer}.mlp.hook_post", make_neuron_hook(layer)))
+
+    device = model.cfg.device
+    model.eval()
+    with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
+        for ex in dataset:
+            tokens = model.to_tokens(ex.corrupted_prompt, prepend_bos=True).to(device)
+            model(tokens)
+
+    means: Dict[str, torch.Tensor] = {}
+    for layer in layer_set:
+        if layer in head_sums:
+            means[f"z_L{layer}"] = head_sums[layer] / max(head_counts[layer], 1)
+        if layer in mlp_sums:
+            means[f"mlp_out_L{layer}"] = mlp_sums[layer] / max(mlp_counts[layer], 1)
+        if layer in neuron_sums:
+            means[f"neuron_post_L{layer}"] = neuron_sums[layer] / max(neuron_counts[layer], 1)
+    return means
+
+
+def _build_mean_ablation_hooks(
+    removed: Iterable[Component],
+    means: Dict[str, "torch.Tensor"],
+) -> List[Tuple[str, callable]]:
+    """Same as _build_ablation_hooks but replaces components with their
+    pre-computed corrupted-distribution means instead of zero."""
+    heads_by_layer: Dict[int, List[int]] = defaultdict(list)
+    mlp_layers: set = set()
+    neurons_by_layer: Dict[int, List[int]] = defaultdict(list)
+    for comp in removed:
+        if comp.kind == "head":
+            heads_by_layer[comp.layer].append(comp.index)
+        elif comp.kind == "mlp":
+            mlp_layers.add(comp.layer)
+        elif comp.kind == "neuron":
+            neurons_by_layer[comp.layer].append(comp.index)
+
+    hooks: List[Tuple[str, callable]] = []
+
+    for layer, indices in heads_by_layer.items():
+        mean_z = means.get(f"z_L{layer}")
+        if mean_z is None:
+            raise KeyError(f"No mean cached for z_L{layer}")
+        idx = torch.tensor(indices, device=mean_z.device)
+        # mean_z: (n_heads, d_head). Select the ablated heads -> (len(idx), d_head).
+        mean_sel = mean_z.index_select(0, idx)
+        def hook_heads(act, hook=None, idx=idx, mean_sel=mean_sel):
+            idx_cast = idx.to(device=act.device)
+            mean_cast = mean_sel.to(device=act.device, dtype=act.dtype)
+            act[:, :, idx_cast, :] = mean_cast[None, None, :, :]
+            return act
+        hooks.append((f"blocks.{layer}.attn.hook_z", hook_heads))
+
+    for layer in mlp_layers:
+        mean_m = means.get(f"mlp_out_L{layer}")
+        if mean_m is None:
+            raise KeyError(f"No mean cached for mlp_out_L{layer}")
+        def hook_mlp(act, hook=None, mean_m=mean_m):
+            mean_cast = mean_m.to(device=act.device, dtype=act.dtype)
+            act[:, :, :] = mean_cast[None, None, :]
+            return act
+        hooks.append((f"blocks.{layer}.hook_mlp_out", hook_mlp))
+
+    for layer, indices in neurons_by_layer.items():
+        mean_n = means.get(f"neuron_post_L{layer}")
+        if mean_n is None:
+            raise KeyError(f"No mean cached for neuron_post_L{layer}")
+        idx = torch.tensor(indices, device=mean_n.device)
+        mean_sel = mean_n.index_select(0, idx)
+        def hook_neurons(act, hook=None, idx=idx, mean_sel=mean_sel):
+            idx_cast = idx.to(device=act.device)
+            act[:, :, idx_cast] = mean_sel.to(device=act.device, dtype=act.dtype)[None, None, :]
+            return act
+        hooks.append((f"blocks.{layer}.mlp.hook_post", hook_neurons))
+
+    return hooks
+
+
+def evaluate_accuracy_with_mean_ablation(
+    model: Any,
+    dataset: Iterable[Example],
+    task: str,
+    removed: Iterable[Component],
+    means: Dict[str, "torch.Tensor"],
+    verbose: bool = False,
+) -> Tuple[int, int]:
+    """Same evaluation loop as evaluate_accuracy_with_ablation, but ablation
+    replaces each removed component's activation with its pre-computed
+    corrupted-distribution mean rather than zero."""
+    model.eval()
+    hooks = _build_mean_ablation_hooks(removed, means)
+
+    correct, total = 0, 0
+    device = model.cfg.device
+    with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
+        for ex in dataset:
+            logits = model(model.to_tokens(ex.prompt, prepend_bos=True).to(device))
+            logits_last = logits[0, -1]
+
+            if task == "boolean":
+                pred_label, _ = _classify_boolean(logits_last, model, verbose=verbose)
+                if pred_label == ex.target:
+                    correct += 1
+            elif task == "ioi":
+                labels = ex.labels or [ex.target, ex.corrupted_target]
+                pred_idx = _classify_ioi(logits_last, model, labels)
+                gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
+                if pred_idx == gold_idx:
+                    correct += 1
+            elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
+                labels = ex.labels or ["A", "B", "C", "D"]
+                pred_label = _classify_from_labels(logits_last, model, labels)
+                if pred_label == ex.target:
+                    correct += 1
+            else:
+                if _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose):
+                    correct += 1
+            total += 1
+    return correct, total
+
+
 def _extract_gold_ids(model: Any, prompt: str, target: str, device, verbose: bool = False) -> List[int]:
     """Return token ids for the continuation target, relative to the prompt."""
     prompt_tok = model.to_tokens(prompt, prepend_bos=True).to(device)
@@ -316,4 +511,10 @@ def evaluate_predictions(
     return correct, total, per_ex
 
 
-__all__ = ["evaluate_accuracy", "evaluate_accuracy_with_ablation", "evaluate_predictions"]
+__all__ = [
+    "evaluate_accuracy",
+    "evaluate_accuracy_with_ablation",
+    "evaluate_accuracy_with_mean_ablation",
+    "evaluate_predictions",
+    "compute_corrupted_means",
+]

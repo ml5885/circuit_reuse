@@ -110,7 +110,6 @@ def heatmap(matrix, row_labels, col_labels, title, cbar_label, vmin, vmax, cmap,
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
-    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 

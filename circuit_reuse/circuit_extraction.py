@@ -64,16 +64,22 @@ class CircuitExtractor:
         self.use_lrp = bool(method == "relp") if use_lrp is None else bool(use_lrp)
         self.lrp_rules = list(lrp_rules) if lrp_rules is not None else list(DEFAULT_LRP_RULES)
         self.ig_steps = int(ig_steps)
+        # Extraction callers use this to make incomplete runs fail loudly.
+        self.last_skipped_examples = 0
         if self.task_metric not in ("logprob", "kl"):
             raise ValueError(f"Unknown task_metric: {self.task_metric}")
 
         if method in ("eap", "eap_ig"):
-            if granularity == "neuron":
+            if granularity == "neuron" and method != "eap_ig":
                 raise ValueError(
-                    "granularity='neuron' is only supported with method='relp'. "
-                    "Use --method relp for neuron-level circuits."
+                    "granularity='neuron' is supported with method='eap_ig' or "
+                    "method='relp'."
                 )
-            self.graph = Graph.from_model(model, granularity=granularity)
+            self.graph = (
+                Graph.from_model(model, granularity=granularity)
+                if granularity == "head_mlp"
+                else None
+            )
         elif method == "relp":
             self.graph = None
         else:
@@ -285,7 +291,103 @@ class CircuitExtractor:
 
         if self.method == "relp":
             return self._extract_relp(examples, task_name, device, autocast_ctx)
+        if self.method == "eap_ig" and self.granularity == "neuron":
+            return self._extract_eap_ig_neurons(examples, task_name, autocast_ctx)
         return self._extract_edge_graph(examples, task_name, device, autocast_ctx)
+
+    def _extract_eap_ig_neuron_example(
+        self, example: Example, autocast_ctx, hook_targets: List[HookTarget]
+    ) -> Dict[Component, float]:
+        """Score MLP neurons with activation differences times path-averaged gradients."""
+        (
+            clean_tokens,
+            corrupted_tokens,
+            clean_attention_mask,
+            corrupted_attention_mask,
+            metric,
+            _max_len,
+        ) = self._prepare_paired_inputs(example)
+        hook_names = [name for name, _ in hook_targets]
+
+        def cache_hook(store: Dict[str, torch.Tensor], name: str):
+            def hook_fn(value, hook=None):
+                store[name] = value.detach()
+            return hook_fn
+
+        clean_cache: Dict[str, torch.Tensor] = {}
+        corrupted_cache: Dict[str, torch.Tensor] = {}
+        with torch.inference_mode():
+            with self.model.hooks(fwd_hooks=[(n, cache_hook(corrupted_cache, n)) for n in hook_names]):
+                corrupted_logits = self.model(
+                    corrupted_tokens, attention_mask=corrupted_attention_mask
+                )
+            with self.model.hooks(fwd_hooks=[(n, cache_hook(clean_cache, n)) for n in hook_names]):
+                self.model(clean_tokens, attention_mask=clean_attention_mask)
+
+            corrupted_embed = self.model.embed(corrupted_tokens)
+            clean_embed = self.model.embed(clean_tokens)
+
+        grad_sums = {name: torch.zeros_like(clean_cache[name]) for name in hook_names}
+
+        def grad_hook(name: str):
+            def hook_fn(grad, hook=None):
+                grad_sums[name].add_(grad.detach())
+            return hook_fn
+
+        for step in range(self.ig_steps):
+            alpha = step / self.ig_steps
+
+            def embed_hook(value, hook=None, alpha=alpha):
+                interpolated = corrupted_embed + alpha * (clean_embed - corrupted_embed)
+                return interpolated.to(device=value.device, dtype=value.dtype).requires_grad_(True)
+
+            with autocast_ctx:
+                with self.model.hooks(
+                    fwd_hooks=[("hook_embed", embed_hook)],
+                    bwd_hooks=[(name, grad_hook(name)) for name in hook_names],
+                ):
+                    logits = self.model(clean_tokens, attention_mask=clean_attention_mask)
+                    metric(logits, corrupted_logits, None, None).backward()
+            self.model.zero_grad(set_to_none=True)
+            self.model.reset_hooks()
+
+        comp_scores: Dict[Component, float] = {}
+        for name, scorer in hook_targets:
+            activation_difference = clean_cache[name] - corrupted_cache[name]
+            attr = activation_difference * (grad_sums[name] / self.ig_steps)
+            comp_scores.update(scorer(attr))
+        return comp_scores
+
+    def _extract_eap_ig_neurons(
+        self, examples: List[Example], task_name: str, autocast_ctx
+    ) -> Tuple[List[Set[Component]], List[Dict[Component, float]]]:
+        circuits: List[Set[Component]] = []
+        per_example_scores: List[Dict[Component, float]] = []
+        hook_targets = self._hook_targets()
+        n_skipped = 0
+        for idx, example in enumerate(examples):
+            try:
+                scores = self._extract_eap_ig_neuron_example(
+                    example, autocast_ctx, hook_targets
+                )
+            except torch.cuda.OutOfMemoryError:
+                n_skipped += 1
+                self.model.zero_grad(set_to_none=True)
+                self.model.reset_hooks()
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[OOM] Skipping example {idx}")
+                continue
+            per_example_scores.append(scores)
+            circuits.append(set(scores))
+            if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
+                print(
+                    f"[{task_name}] (eap_ig/neuron) "
+                    f"{idx + 1}/{len(examples)} examples processed"
+                )
+            torch.cuda.empty_cache()
+        self.last_skipped_examples = n_skipped
+        return circuits, per_example_scores
 
     def _extract_relp(
         self, examples: List[Example], task_name: str, device: str, autocast_ctx
@@ -318,6 +420,7 @@ class CircuitExtractor:
                 )
             torch.cuda.empty_cache()
 
+        self.last_skipped_examples = n_skipped
         if n_skipped:
             print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
         return circuits, per_example_scores
@@ -410,6 +513,7 @@ class CircuitExtractor:
                 )
             torch.cuda.empty_cache()
 
+        self.last_skipped_examples = n_skipped
         if n_skipped:
             print(f"[WARN] {n_skipped}/{len(examples)} examples skipped due to OOM")
 

@@ -366,7 +366,7 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
     chunk_size = 6
     for chunk_idx in range(0, len(data), chunk_size):
         chunk = data[chunk_idx : chunk_idx + chunk_size]
-        fig, axes = plt.subplots(2, 3, figsize=(14, 8), squeeze=False, sharey=True)
+        fig, axes = plt.subplots(2, 3, figsize=(12, 5.5), squeeze=False, sharey=True)
         axes_flat = axes.flatten()
 
         k_val = chunk[0].get("_topk") or chunk[0].get("K") or ""
@@ -385,18 +385,18 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
 
             x = np.arange(len(tasks))
             w = 0.35
-            ax.bar(x - w / 2, diag, w, label="Own circuit", color="#6A0572", edgecolor="none")
-            ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#AB83A1", edgecolor="none")
+            ax.bar(x - w / 2, diag, w, label="Own circuit", color="#2B5F8C", edgecolor="none")
+            ax.bar(x + w / 2, offdiag, w, label="Other circuits (mean)", color="#A6CEE3", edgecolor="none")
             ax.set_xticks(x)
-            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=13)
-            ax.set_title(_format_model_title(d), fontsize=18, pad=4)
+            ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=10)
+            ax.set_title(_format_model_title(d), fontsize=13, pad=4)
             ax.axhline(0, color="black", linewidth=0.6, alpha=0.6)
             ax.grid(False)
             ax.grid(True, axis="y", which="major", linewidth=0.6, alpha=0.3)
             ax.grid(False, axis="x", which="both")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            ax.tick_params(labelsize=13)
+            ax.tick_params(labelsize=10)
 
             row, col = divmod(i, 3)
             if row == 0:
@@ -406,14 +406,14 @@ def plot_diagonal_vs_offdiag_multiplot(data, out_dir):
         for j in range(len(chunk), len(axes_flat)):
             axes_flat[j].set_visible(False)
 
-        fig.supylabel(f"Accuracy Drop (pp)  K={k_val}%", fontsize=19, x=0.06, y=0.55)
+        fig.supylabel(f"Accuracy Drop (pp)  K={k_val}%", fontsize=13, x=0.06, y=0.55)
 
         handles, labels = axes_flat[0].get_legend_handles_labels() if chunk else ([], [])
         if handles:
             fig.legend(
                 handles,
                 labels,
-                fontsize=17,
+                fontsize=12,
                 loc="lower center",
                 bbox_to_anchor=(0.5, -0.06),
                 ncol=2,

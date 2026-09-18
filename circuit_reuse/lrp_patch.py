@@ -180,8 +180,20 @@ def uninstall_lrp_patches() -> None:
     _PATCHED = False
 
 
+def _torch_root(model) -> "torch.nn.Module | None":
+    if hasattr(model, "modules") and callable(model.modules):
+        return model
+    inner = getattr(model, "model", None)
+    if inner is not None and hasattr(inner, "modules"):
+        return inner
+    return None
+
+
 def _wrap_identity_rule_modules(model: HookedTransformer) -> None:
-    for module in model.modules():
+    root = _torch_root(model)
+    if root is None:
+        return
+    for module in root.modules():
         if not isinstance(module, CanBeUsedAsMLP):
             continue
         if not hasattr(module, "act_fn"):
@@ -193,7 +205,10 @@ def _wrap_identity_rule_modules(model: HookedTransformer) -> None:
 
 
 def _unwrap_identity_rule_modules(model: HookedTransformer) -> None:
-    for module in model.modules():
+    root = _torch_root(model)
+    if root is None:
+        return
+    for module in root.modules():
         if hasattr(module, "_lrp_original_act_fn"):
             module._modules.pop("act_fn", None)
             object.__setattr__(module, "act_fn", module._lrp_original_act_fn)

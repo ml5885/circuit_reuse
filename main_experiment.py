@@ -464,6 +464,11 @@ def _run_single_combination(
         # Load cached scores
         try:
             example_scores = _load_cached_attributions(attrib_path)
+            if len(example_scores) != len(train_examples):
+                raise RuntimeError(
+                    f"cached attribution file is incomplete: {attrib_path} "
+                    f"({len(example_scores)} != {len(train_examples)})"
+                )
             if debug:
                 print(f"[CACHE] Loaded cached attributions from {attrib_path}")
         except Exception as e:
@@ -478,6 +483,11 @@ def _run_single_combination(
                 )
             # Otherwise load from cache as above (force_extract overrides analysis)
             example_scores = _load_cached_attributions(attrib_path)
+            if len(example_scores) != len(train_examples):
+                raise RuntimeError(
+                    f"cached attribution file is incomplete: {attrib_path} "
+                    f"({len(example_scores)} != {len(train_examples)})"
+                )
             if debug:
                 print(f"[CACHE] Loaded cached attributions from {attrib_path}")
         else:
@@ -499,6 +509,13 @@ def _run_single_combination(
                     amp=amp,
                     device=device,
                 )
+                skipped_examples = int(getattr(extractor, "last_skipped_examples", 0))
+                if skipped_examples or len(example_scores) != len(train_examples):
+                    raise RuntimeError(
+                        f"incomplete extraction for {combo_key_root}: "
+                        f"processed={len(example_scores)} expected={len(train_examples)} "
+                        f"skipped={skipped_examples}"
+                    )
             except torch.cuda.OutOfMemoryError as e:
                 print(f"[OOM] Skipping attribution for {combo_key_root}: {e}")
                 return
@@ -534,6 +551,7 @@ def _run_single_combination(
         "num_examples": len(dataset),
         "digits": digits if task == "addition" else None,
         "method": method,
+        "granularity": granularity,
         "task_metric": task_metric,
         "ig_steps": int(ig_steps) if method == "eap_ig" else None,
         "top_k_list": list(sorted(set(int(k) for k in top_k_list))),
@@ -547,6 +565,9 @@ def _run_single_combination(
         "baseline_val_accuracy": baseline_val_acc,
         "baseline_val_correct": baseline_val_correct,
         "baseline_val_total": baseline_val_total,
+        "extraction_expected_examples": len(train_examples),
+        "extraction_processed_examples": len(example_scores),
+        "skipped_examples": int(getattr(locals().get("extractor", None), "last_skipped_examples", 0)),
         "by_k": {},
     }
 
@@ -874,15 +895,19 @@ def _run_single_combination(
     combo_dir = run_dir
     combo_dir.mkdir(parents=True, exist_ok=True)
 
-    with (combo_dir / "metrics.json").open("w") as f:
-        json.dump(metrics, f, indent=2, sort_keys=True)
+    metrics_tmp = combo_dir / "metrics.json.tmp"
+    with metrics_tmp.open("w") as f:
+        json.dump(metrics, f, indent=2, sort_keys=True, allow_nan=False)
+    metrics_tmp.replace(combo_dir / "metrics.json")
     print(f"[METRICS] {combo_dir/'metrics.json'}")
 
     if results_home is not None:
         # Mirror metrics.json to a login-accessible path
         results_home.mkdir(parents=True, exist_ok=True)
-        with (results_home / "metrics.json").open("w") as f:
-            json.dump(metrics, f, indent=2, sort_keys=True)
+        mirror_tmp = results_home / "metrics.json.tmp"
+        with mirror_tmp.open("w") as f:
+            json.dump(metrics, f, indent=2, sort_keys=True, allow_nan=False)
+        mirror_tmp.replace(results_home / "metrics.json")
         print(f"[METRICS-HOME] {results_home/'metrics.json'}")
 
     print(f"[DONE] {combo_dir}")
@@ -940,9 +965,10 @@ def main():
             method = args.method
             granularity = args.granularity
 
-        if granularity == "neuron" and method != "relp":
+        if granularity == "neuron" and method not in ("relp", "eap_ig"):
             raise SystemExit(
-                f"--granularity neuron requires --method relp (got --method {method})"
+                "--granularity neuron requires --method relp or eap_ig "
+                f"(got --method {method})"
             )
 
         lrp_rules = [r.strip() for r in args.lrp_rules.split(",") if r.strip()]

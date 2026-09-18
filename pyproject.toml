@@ -6,6 +6,10 @@ requires-python = ">=3.10"
 [tool.setuptools]
 packages = ["circuit_reuse"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["reference_code", ".venv", "results", "results2", "cache"]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

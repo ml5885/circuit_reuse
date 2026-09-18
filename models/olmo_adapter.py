@@ -67,8 +67,11 @@ class HFHookedOLMo:
         self.model.eval()
         return self
 
-    def __call__(self, tokens: torch.Tensor) -> torch.Tensor:
-        out = self.model(input_ids=tokens.to(self.cfg.device))
+    def __call__(self, tokens: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        kwargs = {"input_ids": tokens.to(self.cfg.device)}
+        if attention_mask is not None:
+            kwargs["attention_mask"] = attention_mask.to(self.cfg.device)
+        out = self.model(**kwargs)
         return out.logits
 
     def reset_hooks(self) -> None:

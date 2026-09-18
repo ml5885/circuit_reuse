@@ -138,9 +138,9 @@ def compute_all(method: str) -> tuple[np.ndarray, np.ndarray]:
     return pairwise, reference
 
 
-def plot_heatmap(data: np.ndarray, fname: str, title: str):
+def plot_heatmap(data: np.ndarray, fname: str):
     fig, axes = plt.subplots(2, 3, figsize=(22, 11))
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.86, bottom=0.18, wspace=0.45, hspace=0.22)
+    fig.subplots_adjust(left=0.10, right=0.97, top=0.92, bottom=0.18, wspace=0.45, hspace=0.22)
     for mi, (_, label) in enumerate(MODELS):
         ax = axes.flat[mi]
         im = ax.imshow(data[mi], aspect="auto", vmin=-1.0, vmax=1.0, cmap=CMAP)
@@ -158,13 +158,12 @@ def plot_heatmap(data: np.ndarray, fname: str, title: str):
         # Top row: hide x-tick labels (shared with bottom row). Bottom row only.
         if mi // 3 == 1:
             ax.set_xticklabels([f"{k}%" for k in K_PCTS], fontsize=18)
-            ax.set_xlabel("top-$K$", fontsize=20)
+            ax.set_xlabel("Top-K (%)", fontsize=20)
         else:
             ax.set_xticklabels([])
-    fig.suptitle(title, fontsize=24, y=0.96)
     cbar_ax = fig.add_axes([0.30, 0.07, 0.40, 0.022])
     cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
-    cbar.set_label(r"Spearman $\rho$", fontsize=20)
+    cbar.set_label("Spearman rho", fontsize=20)
     cbar.ax.tick_params(labelsize=17)
     out_path = FIGS / fname
     fig.savefig(out_path, dpi=130)
@@ -183,11 +182,9 @@ def main():
         saved[f"{method}_reference"] = reference
         plot_heatmap(
             pairwise, f"spearman_{method}_pairwise_heatmap.png",
-            f"Mean pairwise Spearman $\\rho$ across examples ({method}, head_mlp, n=1000)",
         )
         plot_heatmap(
             reference, f"spearman_{method}_reference_heatmap.png",
-            f"Spearman $\\rho$ vs aggregate-ranking reference ({method}, head_mlp, n=1000)",
         )
     np.savez(
         OUT / "spearman_metrics.npz",

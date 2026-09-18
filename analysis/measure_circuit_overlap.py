@@ -14,7 +14,7 @@ plt.rcParams.update({"font.family": "serif", "font.size": 14})
 
 TASK_DISPLAY = {
     "addition": "Addition",
-    "arc_challenge": "ARC (Challenge)",
+    "arc_challenge": "ARC (Chal.)",
     "arc_easy": "ARC (Easy)",
     "boolean": "Boolean",
     "ioi": "IOI",

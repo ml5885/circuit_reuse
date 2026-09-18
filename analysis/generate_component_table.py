@@ -21,6 +21,7 @@ def parse_attrib_filename(path: Path) -> dict:
     return {
         "model_name": parts[0].replace("_", "/", 1) if "_" in parts[0] else parts[0],
         "task": parts[2],
+        "method": parts[3],
     }
 
 
@@ -95,6 +96,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cache-dir", type=str, default="cache")
     p.add_argument("--output", type=str, default="results2/tables/component_breakdown.tex")
+    p.add_argument("--method", type=str, default="eap_ig", choices=["eap", "eap_ig", "relp"])
     p.add_argument("--k-percents", type=str, default="1,10,20,30")
     p.add_argument("--models", type=str, default=None)
     p.add_argument("--tasks", type=str, default=None)
@@ -113,6 +115,8 @@ def main():
     for path in sorted(cache_dir.glob("*.jsonl")):
         info = parse_attrib_filename(path)
         model_name, task = info["model_name"], info["task"]
+        if info["method"] != args.method:
+            continue
         if model_filter and model_name not in model_filter:
             continue
         if task_filter and task not in task_filter:

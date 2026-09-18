@@ -35,7 +35,7 @@ def main():
     reference = data["reference"]
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
-    fig.subplots_adjust(left=0.13, right=0.97, top=0.87, bottom=0.22, wspace=0.40)
+    fig.subplots_adjust(left=0.13, right=0.97, top=0.93, bottom=0.22, wspace=0.40)
     panels = [
         (axes[0], pairwise, "Pairwise"),
         (axes[1], reference, "vs aggregate-ranking reference"),
@@ -47,7 +47,7 @@ def main():
         ax.set_yticks(range(len(tasks)))
         ax.set_yticklabels(tasks, fontsize=18)
         ax.set_title(label, fontsize=22)
-        ax.set_xlabel("top-$K$", fontsize=20)
+        ax.set_xlabel("Top-K (%)", fontsize=20)
         for ti in range(len(tasks)):
             for ki in range(len(K_pcts)):
                 v = arr[ti, ki]
@@ -55,11 +55,9 @@ def main():
                     continue
                 ax.text(ki, ti, f"{v:.2f}", ha="center", va="center",
                         color=("white" if abs(v) > 0.55 else "black"), fontsize=16)
-    fig.suptitle("Spearman $\\rho$ stability — Qwen3-4B, neuron granularity (RelP, n=200)",
-                 fontsize=24, y=0.96)
     cbar_ax = fig.add_axes([0.30, 0.10, 0.40, 0.022])
     cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
-    cbar.set_label(r"Spearman $\rho$", fontsize=20)
+    cbar.set_label("Spearman rho", fontsize=20)
     cbar.ax.tick_params(labelsize=17)
     out = FIGS / "spearman_relp_neuron_qwen3-4b_heatmap.png"
     fig.savefig(out, dpi=130)

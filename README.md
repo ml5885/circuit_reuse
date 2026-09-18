@@ -38,7 +38,7 @@ python cross_task_experiment.py \
 - `--method`: Attribution method (`eap`, `eap_ig`, `relp`, or `neuron_attr`). `neuron_attr` is a deprecated alias for `--method relp --granularity neuron`.
 - `--ig-steps`: Number of interpolation steps for `--method eap_ig` (default: `5`).
 - `--task-metric`: Attribution objective (`logprob` by default, or `kl`).
-- `--granularity`: `head_mlp` (default) or `neuron`. `neuron` requires `--method relp`.
+- `--granularity`: `head_mlp` (default) or `neuron`. `neuron` supports `--method relp` and `--method eap_ig`.
 - `--use-lrp` / `--no-use-lrp`: force LRP backward rules on/off. Default: on for `relp`, off otherwise.
 - `--lrp-rules`: comma-separated LRP rules. Default: `LN-rule,AH-rule,Half-rule`.
 - `--score-threshold`: Absolute score threshold (e.g., `0.005`). When set, selects components by score magnitude instead of top-K%.
@@ -78,7 +78,7 @@ All in `analysis/`:
 | `head_mlp` (default) | Attention heads (at `attn.hook_z`) + MLP layer outputs (at `hook_mlp_out`) | Standard per-head, per-layer granularity. |
 | `neuron` | MLP neurons only (at `mlp.hook_post`, no attention) | Arora et al.'s neuron basis. Only valid with `--method relp`. |
 
-For the edge-graph methods `eap` and `eap_ig`, only `head_mlp` is supported; `neuron` requires `--method relp`.
+`eap` uses the edge graph and supports `head_mlp`. `eap_ig` and `relp` also support MLP-neuron components scored at `hook_post`.
 
 ```python
 from circuit_reuse.circuit_extraction import CircuitExtractor

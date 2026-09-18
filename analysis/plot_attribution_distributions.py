@@ -71,7 +71,7 @@ def histogram_for_task(path: Path, bins: np.ndarray) -> np.ndarray:
 
 def plot_method_panels(method: str) -> Path:
     fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    fig.subplots_adjust(left=0.07, right=0.97, top=0.90, bottom=0.10, wspace=0.25, hspace=0.30)
+    fig.subplots_adjust(left=0.07, right=0.97, top=0.96, bottom=0.10, wspace=0.25, hspace=0.30)
     for mi, (slug, label) in enumerate(MODELS):
         ax = axes.flat[mi]
         any_data = False
@@ -96,8 +96,6 @@ def plot_method_panels(method: str) -> Path:
         if any_data and mi == 0:
             ax.legend(fontsize=10, loc="lower left")
         ax.grid(True, alpha=0.3, which="both")
-    fig.suptitle(f"|attribution score| distribution — {method}, head_mlp, n=1000",
-                 fontsize=22, y=0.96)
     out = FIGS / f"score_dist_{method}_head_mlp.png"
     fig.savefig(out, dpi=130)
     plt.close(fig)

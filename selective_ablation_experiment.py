@@ -160,7 +160,8 @@ def main():
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         model_slug = args.model_name.replace("/", "_")
-        fname = f"selective_{model_slug}_K{args.K}_t{args.threshold}_{args.task_a}_vs_{args.task_b}.json"
+        rev_suffix = f"_{args.hf_revision}" if args.hf_revision else ""
+        fname = f"selective_{model_slug}{rev_suffix}_K{args.K}_t{args.threshold}_{args.task_a}_vs_{args.task_b}.json"
         out_path = out_dir / fname
         with out_path.open("w") as f:
             json.dump(output, f, indent=2)

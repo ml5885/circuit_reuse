@@ -47,7 +47,7 @@ MODEL_ORDER = [
 
 TASK_ORDER = [
     ("addition", "Addition"),
-    ("arc_challenge", "ARC (Challenge)"),
+    ("arc_challenge", "ARC (Chal.)"),
     ("arc_easy", "ARC (Easy)"),
     ("boolean", "Boolean"),
     ("ioi", "IOI"),
