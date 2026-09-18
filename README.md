@@ -1,142 +1,145 @@
-# Circuit Reuse Experiments
+# Circuit Reuse
 
-Measures per-example circuits via Edge Attribution Patching, quantifies how much they overlap across examples (reuse@p), and validates shared circuits causally via zero-ablation against size-matched random controls.
+Code for *How Much Do Circuits Tell Us? Measuring the Consistency and Specificity of Language Model Circuits*.
+
+For each example in a task dataset, we extract a circuit, defined as the top-K% of components by attribution score. We then define the task's shared circuit, $S_P$, as the set of components that appear in at least P% of these per-example circuits. We evaluate $S_P$ on two criteria.
+
+**Consistency** is a measure of how well one circuit describes the whole task. Reuse@P quantifies it as the fraction of each example's circuit that is contained in $S_P$, averaged over examples. To check that $S_P$ matters causally, we zero-ablate it and measure the accuracy drop relative to ablating a random set of components with the same size and the same head/MLP composition.
+
+**Specificity** is a measure of how much the circuit belongs to its task rather than to the model in general. We ablate task A's shared circuit and measure the accuracy drop on task A, then ablate every other task's shared circuit and measure the drop on task A again. A specific circuit hurts its own task more than the others' circuits do.
+
+We run this at two granularities, attention heads and MLP blocks (`head_mlp`) or individual MLP neurons (`neuron`), with three attribution methods (EAP, EAP-IG, RelP), on six tasks and five models: Gemma 2 2B and its instruction-tuned variant, Llama 3.2 3B and its Instruct variant, and Qwen3 4B.
 
 ## Setup
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -e .
+huggingface-cli login   # gemma-2 and llama-3.2 are gated
 ```
 
-## Quick start
+## Layout
+
+| Path | Contents |
+|---|---|
+| `main_experiment.py` | Runs attribution and the within-task evaluation for one model, task, method and granularity. Writes `metrics.json`. |
+| `cross_task_experiment.py` | Builds the cross-task ablation matrix for every (K, P) setting. Writes one JSON file per setting. |
+| `cross_task_mean_ablation.py` | The same matrix with mean ablation instead of zero ablation. |
+| `selective_ablation_experiment.py` | For a task pair (A, B), ablates the shared core $C_A \cap C_B$ and the residuals $C_A \setminus C_B$ and $C_B \setminus C_A$ separately. |
+| `circuit_reuse/circuit_extraction.py` | `CircuitExtractor`, which implements EAP, EAP-IG and RelP at either granularity. |
+| `circuit_reuse/graph.py` | The edge graph used by `eap` and `eap_ig`. |
+| `circuit_reuse/lrp_patch.py` | LRP backward rules for `relp`. |
+| `circuit_reuse/evaluate.py` | Accuracy evaluation under zero and mean ablation. |
+| `circuit_reuse/dataset.py` | Tasks and counterfactuals. |
+| `models/olmo_adapter.py` | `load_model_any`, which loads through TransformerLens and falls back to a hooked HF wrapper for OLMo checkpoints. |
+| `analysis/` | Aggregation scripts and figure generators. |
+| `scripts/`, `paper2/`, `results*/`, `cache*/` | SLURM and pod scripts, paper source, outputs, and attribution caches. Not tracked. |
+
+## Tasks
+
+| Task | Source | Counterfactual | Chance |
+|---|---|---|---|
+| `addition` | generated, `Compute: a + b = ` | different (a, b) | 0 |
+| `boolean` | generated, `Evaluate: <expr> = ` | one literal flipped so the value changes; expressions with no such literal resampled | 0.5 |
+| `ioi` | `mib-bench/ioi` | `s2_io_flip` (answer flips IO → S) | 0.5 |
+| `mcqa` | `mib-bench/copycolors_mcqa` | `answerPosition` | 0.25 |
+| `arc_easy`, `arc_challenge` | `mib-bench/arc_*` | `answerPosition` | 0.25 |
+
+Each run generates or reads `--num_examples` examples, shuffles them with `--seed`, and holds out `--val-fraction` of them for validation. `google/gemma-2-2b-it` receives a few-shot prefix on `addition`.
+
+## Pipeline
+
+### 1. Extraction
 
 ```bash
-
-# Single-task knockout experiment
 python main_experiment.py \
-  --model_name qwen3-0.6b --task ioi --num_examples 50 \
-  --top_k_list 5,10 --reuse-thresholds 95,99,100 \
-  --perm-trials 2000 --dtype bf16 --device cpu --debug
-
-# Cross-task ablation confusion matrix (requires prior main experiment results)
-python cross_task_experiment.py \
-  --results-dir results/my_run --model_name qwen3-4b \
-  --tasks "boolean,addition,ioi,mcqa" --K 100 --threshold 100 \
-  --output-dir results/cross_task
+  --model_name google/gemma-2-2b --task ioi --num_examples 1000 --digits 3 \
+  --method eap_ig --granularity head_mlp --ig-steps 5 \
+  --top_k_list 1,5,10,20,30 --reuse-thresholds 50,75,85,90,95,96,97,98,99,100 \
+  --perm-trials 5000 --dtype bf16 --amp --device cuda \
+  --run-name granularity_parity_eap_ig_head_mlp \
+  --output-dir results/granularity_parity/granularity_parity_extraction \
+  --cache-dir cache_granularity_parity/eap_ig_head_mlp
 ```
 
-## Key CLI args
+The output is `<output-dir>/<run-name>/<model>__main__<task>__<method>__.../metrics.json`, with the following structure:
 
-- `--top_k_list`: Per-example top-K values as percentages (e.g., `50,75,100`).
-- `--reuse-thresholds`: Thresholds p as percentages (e.g., `95,99,100`).
-- `--perm-trials`: Trials for paired permutation test (shared vs control).
-- `--ignore-type`: Sample control randomly regardless of head/MLP type.
-- `--analysis`: Skip extraction, load cached attributions only.
-- `--method`: Attribution method (`eap`, `eap_ig`, `relp`, or `neuron_attr`). `neuron_attr` is a deprecated alias for `--method relp --granularity neuron`.
-- `--ig-steps`: Number of interpolation steps for `--method eap_ig` (default: `5`).
-- `--task-metric`: Attribution objective (`logprob` by default, or `kl`).
-- `--granularity`: `head_mlp` (default) or `neuron`. `neuron` supports `--method relp` and `--method eap_ig`.
-- `--use-lrp` / `--no-use-lrp`: force LRP backward rules on/off. Default: on for `relp`, off otherwise.
-- `--lrp-rules`: comma-separated LRP rules. Default: `LN-rule,AH-rule,Half-rule`.
-- `--score-threshold`: Absolute score threshold (e.g., `0.005`). When set, selects components by score magnitude instead of top-K%.
+```
+baseline_{train,val}_accuracy
+by_k[K].thresholds[P]: shared_components, shared_circuit_size, reuse_percent,
+                       train/val: {ablation_accuracy, control_accuracy, permutation}
+```
 
-## Analysis scripts
+Per-example attribution scores are cached as JSONL files in `--cache-dir`, one line per example with every component's score. `--analysis` recomputes the metrics from the cache without loading a model; `--force-extract` ignores the cache and re-runs attribution.
 
-All in `analysis/`:
+### 2. Cross-task ablation
 
-- `plot_accuracy_and_lift_bars.py` -- per-model accuracy and lift bar charts
-- `plot_k_sweep.py` -- lift and reuse vs top-K line plots
-- `plot_attribution_scores.py` -- attribution score distribution histograms
-- `multiplot_lift_and_reuse.py` -- multi-panel lift and reuse bar charts
-- `multiplot_pvalues.py` -- permutation p-value visualizations
-- `generate_air_tables.py` -- LaTeX AIR tables (pretraining sweep)
-- `cross_task_tables.py` -- cross-task ablation confusion matrices and heatmaps
+```bash
+python cross_task_experiment.py \
+  --results-dir results/granularity_parity/granularity_parity_extraction/granularity_parity_eap_ig_head_mlp \
+  --model_name google/gemma-2-2b --method eap_ig --granularity head_mlp \
+  --tasks addition,arc_challenge,arc_easy,boolean,ioi,mcqa \
+  --K 1,5,10,20,30 --threshold 50,75,85,90,95,96,97,98,99,100 \
+  --num-examples 100 --digits 3 --device cuda \
+  --output-dir results/granularity_parity/granularity_parity_cross_task/eap_ig_head_mlp
+```
+
+The model is loaded once and every (K, P) matrix is evaluated. Each `cross_task_<model>_<method>_<granularity>_K<K>_p<P>.json` file holds `cells[donor][target]` with the baseline and ablated accuracies and the drop in percentage points, plus the baselines and circuit sizes. Matrices that already exist are skipped, so the command can be rerun after an interruption. `--refresh-tasks t1,t2` recomputes only the cells where the donor or the target is in the list and copies the other cells from the existing file.
+
+### 3. Aggregation and figures
+
+```bash
+python -m analysis.granularity_parity --results-root results/granularity_parity \
+    --output-dir results/granularity_parity_analysis --plots
+```
+
+This reads every `metrics.json` and cross-task JSON under `--results-root` and writes the tidy CSVs (`extraction_tidy.csv`, `cross_task_tidy.csv`, `overlap_pairs.csv`, `bootstrap_summary.csv`, `circuit_composition.csv`) and summary figures. The scripts below read those CSVs:
+
+| Script | Output |
+|---|---|
+| `analysis/paper_candidates.py` | The paper's figures, written to `paper2/candidates/`; `sync_paper()` copies the chosen ones into the paper's `figures/`. |
+| `analysis/paper2_figures.py` | Alternative renderings of each main-text claim. |
+| `analysis/appendix_tables.py --method M --granularity G` | Appendix LaTeX tables. |
+| `analysis/review_plots.py [A1 ...]` | The analyses requested by the reviews that need no GPU. Writes `paper2/review_plots.md`. |
+| `analysis/pat_confound_checks.py` | Score-rule and top-K confound checks computed from the per-example caches. |
+| `analysis/zero_vs_mean_ablation.py`, `analysis/selective_ablation_summary.py` | Summaries of the mean-ablation and selective-ablation experiments. |
+
+The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) predate the tidy CSVs and read `metrics.json` files directly.
+
+## `main_experiment.py` arguments
+
+| Argument | Meaning |
+|---|---|
+| `--method` | Attribution method: `eap`, `eap_ig`, or `relp`. `neuron_attr` is a deprecated alias for `--method relp --granularity neuron`. |
+| `--granularity` | `head_mlp` scores attention heads at `attn.hook_z` and MLP blocks at `hook_mlp_out`; `neuron` scores MLP neurons at `mlp.hook_post` and is supported by `eap_ig` and `relp`. |
+| `--top_k_list` | Per-example circuit sizes, as percentages of all components. |
+| `--reuse-thresholds` | The consensus thresholds P, as percentages. |
+| `--perm-trials` | Number of trials for the paired permutation test of the shared circuit against the control. |
+| `--ig-steps` | Number of integrated-gradients interpolation steps for `eap_ig` (default 5). |
+| `--task-metric` | Attribution objective: `logprob`, the summed log-probability of the gold tokens (default), or `kl`. |
+| `--ignore-type` | Sample the control without matching component types. |
+| `--score-threshold` | Select components with `\|score\| ≥ τ Σ\|scores\|` instead of the top-K%. Results are stored under `by_threshold`. |
+| `--use-lrp` / `--no-use-lrp`, `--lrp-rules` | Enable or disable the LRP backward rules for `relp`, and choose them (default `LN-rule,AH-rule,Half-rule`). |
 
 ## Attribution methods
 
-| Method | Scoring path | Formula | Description |
-|---|---|---|---|
-| `eap` (default) | Edge-level graph | `(corrupted_act − clean_act) × clean_grad` on edges, aggregated per node | Edge Attribution Patching (Syed et al. 2023). Clean and corrupted sequences are padded to a shared length and run with explicit attention masks. |
-| `eap_ig` | Edge-level graph | `mean_t[(corrupted_act − clean_act) × grad_t]` along the clean↔corrupted input-embedding path | EAP with integrated gradients over inputs, using the same paired-input padding and attention-mask handling as `eap`. |
-| `relp` | Node-level | `corrupted_grad × (clean_act − corrupted_act)` at one hook per component | Relevance Patching (Jafari et al. 2025, arXiv:2508.21258). The backward pass uses LRP rules (`LN-rule`, `AH-rule`, `Half-rule`) so gradients are better-conditioned through LayerNorm/RMSNorm, attention softmax, and gated-MLP multiplications. At `--granularity neuron` this reproduces the MLP-neuron-basis circuits of Arora et al. 2026 (arXiv:2601.22594). |
-| `neuron_attr` | Alias | — | Deprecated alias for `--method relp --granularity neuron`. |
-
-## Task metric
-
-`CircuitExtractor` optimizes a scalar objective over continuation positions during attribution.
-
-- `logprob` (default): sum of gold-token log-probabilities over the clean continuation.
-- `kl`: KL divergence to the paired reference logits. For the edge-graph methods (`eap`, `eap_ig`), gradients are taken on the clean/interpolated path against fixed corrupted logits. For `relp`, gradients are taken on the corrupted path against fixed clean logits.
-
-## Node granularity
-
-| Granularity | Components scored (at `--method relp`) | Notes |
+| Method | Node score | Cost per example |
 |---|---|---|
-| `head_mlp` (default) | Attention heads (at `attn.hook_z`) + MLP layer outputs (at `hook_mlp_out`) | Standard per-head, per-layer granularity. |
-| `neuron` | MLP neurons only (at `mlp.hook_post`, no attention) | Arora et al.'s neuron basis. Only valid with `--method relp`. |
+| `eap` | Edge Attribution Patching (Syed et al. 2023). Each edge is scored as (corrupted activation − clean activation) · clean gradient; a node's score is the sum of the absolute scores of its outgoing edges, so it is non-negative. | 2 forward passes, 1 backward pass |
+| `eap_ig` | EAP with integrated gradients (Hanna et al. 2024): the same edge score with the gradient averaged over `ig_steps` points on the path from the clean to the corrupted input embedding. Non-negative at `head_mlp`; at `neuron` the score is signed. | 2 forward passes, `ig_steps` backward passes |
+| `relp` | Relevance Patching (Jafari et al. 2025): corrupted gradient · (clean activation − corrupted activation) at one hook per component, with LRP backward rules. Signed. | 2 forward passes, 1 backward pass |
 
-`eap` uses the edge graph and supports `head_mlp`. `eap_ig` and `relp` also support MLP-neuron components scored at `hook_post`.
+Top-K selection ranks components by the stored score. Where the score is signed, the circuit therefore consists of the most positive components.
 
-```python
-from circuit_reuse.circuit_extraction import CircuitExtractor
+## Rerunning on a rented GPU
 
-# RelP at head-level — scores attention heads and MLP layers with LRP backward
-extractor = CircuitExtractor(model, method="relp", granularity="head_mlp")
+`scripts/runpod/README.md` describes a one-pod-per-model rerun with email notification on failure, stall, and completion. The directory is not tracked; copy it to the pod by hand.
 
-# Arora's neuron-basis circuits — per-MLP-neuron RelP
-extractor = CircuitExtractor(model, method="relp", granularity="neuron")
+## References
 
-# Classic EAP edge-graph method (unchanged)
-extractor = CircuitExtractor(model, method="eap", granularity="head_mlp")
-
-# EAP-IG over interpolated input embeddings
-extractor = CircuitExtractor(model, method="eap_ig", granularity="head_mlp", ig_steps=5)
-
-# Use KL instead of summed gold-token log-prob
-extractor = CircuitExtractor(model, method="eap", task_metric="kl")
-```
-
-**Computational cost:** `relp` uses two forward passes and one backward pass per example. `eap_ig` uses one corrupted forward pass, one clean forward pass, and `ig_steps` backward passes along the interpolation path.
-
-## Score threshold
-
-Use `--score-threshold` to select circuit components by absolute score magnitude instead of top-K percentage:
-
-```bash
-# Extract + threshold-based selection at the MLP-neuron level
-python main_experiment.py \
-  --model_name gpt2-small --task ioi --num_examples 50 \
-  --top_k_list 5,10 --score-threshold 0.005 \
-  --method relp --granularity neuron --device cpu
-
-# Recompute from cached scores (no re-extraction)
-python main_experiment.py \
-  --model_name gpt2-small --task ioi --num_examples 50 \
-  --top_k_list 5,10 --score-threshold 0.005 \
-  --analysis --method eap --device cpu
-```
-
-A component is included if `|score| >= τ × Σ|all scores|` for that example. Results are stored in `by_threshold` alongside the usual `by_k`.
-
-## Caching
-
-Attribution scores are cached as JSONL in `cache/` (configurable via `--cache-dir`). Filenames encode model, revision, task, method, task metric when non-default, granularity when non-default, `ig_steps` for `eap_ig`, example count, digits, and seed. Use `--force-extract` to recompute.
-
-## Output
-
-Each run saves `metrics.json` with baseline accuracies, per-(K, p) shared circuit components, ablation/control accuracies, knockout_diff (AIR), and permutation test results on train/val splits.
-
-Cross-task experiment saves a confusion matrix CSV and structured JSON with raw and baseline-normalized accuracy drops.
-
-## References & acknowledgements
-
-This project builds on:
-
-- [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens) — hook-based mechanistic-interpretability library; all forward passes and component hooks are TL primitives.
-- [eap-ig](https://github.com/hannamw/eap-ig) — our `eap` and `eap_ig` edge-graph paths (`circuit_reuse/graph.py`) are derived from this implementation of Edge Attribution Patching (Syed et al. 2023, [arXiv:2310.10348](https://arxiv.org/abs/2310.10348)).
-- [RelP (Jafari et al. 2025)](https://arxiv.org/abs/2508.21258) — the `relp` method and the LRP rules in `circuit_reuse/lrp_patch.py` are ported from the authors' TransformerLens fork at [FarnoushRJ/RelP](https://github.com/FarnoushRJ/RelP) (see `reference_code/RelP/`).
-- [ADAG / Arora et al. 2026](https://arxiv.org/abs/2601.22594) — "Language Model Circuits Are Sparse in the Neuron Basis." `--method relp --granularity neuron` reproduces their MLP-neuron-basis circuit scoring. The `reference_code/circuits/` directory vendors the ADAG library (Transluce) for comparison.
-- LRP propagation rules: LN-rule (Ali et al. 2022), AH-rule (Ali et al. 2022), Half-rule (Arras et al. 2019; Jafari et al. 2024).
+- TransformerLens — https://github.com/TransformerLensOrg/TransformerLens
+- EAP / EAP-IG — Syed et al. 2023 (arXiv:2310.10348), Hanna et al. 2024; `circuit_reuse/graph.py` derives from https://github.com/hannamw/eap-ig
+- RelP — Jafari et al. 2025 (arXiv:2508.21258); `lrp_patch.py` ported from https://github.com/FarnoushRJ/RelP
+- Neuron basis — Arora et al. 2026 (arXiv:2601.22594)
+- Datasets — https://huggingface.co/mib-bench
+- LRP rules — LN-rule, AH-rule (Ali et al. 2022); Half-rule (Arras et al. 2019; Jafari et al. 2024)
