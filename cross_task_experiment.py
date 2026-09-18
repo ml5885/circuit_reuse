@@ -1,12 +1,17 @@
+"""Efficient cross-task ablation sweep.
+
+One invocation loads one model and one dataset per task, then evaluates the
+complete ``K x p`` grid.  Outputs are one resumable JSON matrix per setting.
+The old scalar CLI remains valid (``--K 10 --threshold 100``).
 """
-Computes a confusion matrix of accuracy drops from ablating shared circuits across tasks.
-"""
+from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
-import random
 from pathlib import Path
+from typing import Iterable
 
 import torch
 
@@ -16,288 +21,233 @@ from circuit_reuse.evaluate import evaluate_accuracy_with_ablation, evaluate_acc
 from circuit_reuse.circuit_extraction import Component
 
 
-def parse_component_str(s):
-    """Parse a string representation of a component into a Component object.
-
-    The expected format is either ``"head[layer=3, index=2]"`` or
-    ``"mlp[layer=4, index=0]"``. Whitespace around commas is ignored.
-    """
+def parse_component_str(s: str) -> Component:
     kind, rest = s.split("[", 1)
-    rest = rest.rstrip("]")
-    parts = rest.split(",")
-    layer = None
-    index = None
-    for part in parts:
-        k, v = part.split("=")
-        k = k.strip()
-        v = v.strip()
-        if k == "layer":
-            layer = int(v)
-        elif k == "index":
-            index = int(v)
-    if layer is None or index is None:
-        raise ValueError(f"Unable to parse component string: {s}")
-    return Component(layer=layer, kind=kind.strip(), index=index)
+    values = {}
+    for part in rest.rstrip("]").split(","):
+        key, value = part.split("=", 1)
+        values[key.strip()] = int(value.strip())
+    return Component(layer=values["layer"], kind=kind.strip(), index=values["index"])
 
 
-def find_metrics_file(results_dir, model_name, hf_revision, task, threshold=None, score_threshold=None, score_filter=None):
-    """Search results_dir recursively for a metrics file matching the given settings."""
+def parse_int_list(value: str | int | Iterable[int]) -> list[int]:
+    if isinstance(value, int):
+        return [value]
+    if not isinstance(value, str):
+        return [int(x) for x in value]
+    values = [int(x.strip()) for x in value.replace(";", ",").split(",") if x.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError("expected at least one integer")
+    return sorted(set(values))
+
+
+def _matches(data: dict, model_name: str, hf_revision: str | None, task: str,
+             method: str | None = None, granularity: str | None = None) -> bool:
+    actual_granularity = data.get("granularity")
+    if actual_granularity is None and granularity is not None:
+        # Older parity extraction metrics predate the explicit field. Infer
+        # the basis from one stored shared component.
+        sample = ""
+        for by_k in data.get("by_k", {}).values():
+            for entry in by_k.get("thresholds", {}).values():
+                components = entry.get("shared_components", [])
+                if components:
+                    sample = str(components[0])
+                    break
+            if sample:
+                break
+        actual_granularity = "neuron" if sample.startswith("neuron[") else "head_mlp"
+    return (
+        data.get("model_name") == model_name
+        and str(data.get("hf_revision") or "none") == str(hf_revision or "none")
+        and data.get("task") == task
+        and (method is None or data.get("method", "eap") == method)
+        and (granularity is None or actual_granularity == granularity)
+    )
+
+
+def find_metrics_file(results_dir, model_name, hf_revision, task, threshold=None,
+                      score_threshold=None, score_filter=None, method=None,
+                      granularity=None) -> Path:
     candidates = []
-    for root, _, files in os.walk(results_dir):
-        if "metrics.json" in files:
-            path = Path(root) / "metrics.json"
-            with path.open() as f:
-                data = json.load(f)
-            if (
-                data["model_name"] == model_name
-                and str(data["hf_revision"] or "none") == (hf_revision or "none")
-                and data["task"] == task
-            ):
-                candidates.append((path, data))
-
+    for path in Path(results_dir).rglob("metrics.json"):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _matches(data, model_name, hf_revision, task, method, granularity):
+            candidates.append((path, data))
     if not candidates:
-        raise FileNotFoundError(
-            f"No metrics.json found in {results_dir} for model={model_name}, revision={hf_revision}, task={task}."
-        )
+        raise FileNotFoundError(f"No matching metrics.json for {model_name}/{task}")
 
+    def has_setting(data):
+        if score_filter is not None:
+            return str(score_filter) in data.get("by_score_filter", {})
+        if score_threshold is not None:
+            return str(score_threshold) in data.get("by_threshold", {})
+        return any(str(threshold) in entry.get("thresholds", {})
+                   for entry in data.get("by_k", {}).values())
+    matching = [item for item in candidates if has_setting(item[1])]
+    return sorted(matching or candidates, key=lambda x: str(x[0]))[0][0]
+
+
+def load_shared_components(metrics_path: Path, K: int, threshold: int,
+                           score_threshold=None, score_filter=None) -> list[Component]:
+    data = json.loads(Path(metrics_path).read_text())
     if score_filter is not None:
-        tau_key = str(score_filter)
-        for path, data in candidates:
-            if tau_key in data.get("by_score_filter", {}):
-                return path
+        entry = data["by_score_filter"][str(score_filter)]["thresholds"][str(threshold)]
     elif score_threshold is not None:
-        tau_key = str(score_threshold)
-        for path, data in candidates:
-            if tau_key in data.get("by_threshold", {}):
-                return path
-    elif threshold is not None:
-        for path, data in candidates:
-            by_k = data.get("by_k", {})
-            if any(str(threshold) in entry.get("thresholds", {}) for entry in by_k.values()):
-                return path
-
-    return candidates[0][0]
-
-
-def load_shared_components(metrics_path, K, threshold, score_threshold=None, score_filter=None):
-    """Load shared components for a given threshold from a metrics file."""
-    with metrics_path.open() as f:
-        data = json.load(f)
-    if score_filter is not None:
-        thr_entry = data["by_score_filter"][str(score_filter)]["thresholds"][str(threshold)]
-    elif score_threshold is not None:
-        thr_entry = data["by_threshold"][str(score_threshold)]["thresholds"][str(threshold)]
+        entry = data["by_threshold"][str(score_threshold)]["thresholds"][str(threshold)]
     else:
-        thr_entry = data["by_k"][str(K)]["thresholds"][str(threshold)]
-    return [parse_component_str(c) for c in thr_entry["shared_components"]]
+        entry = data["by_k"][str(K)]["thresholds"][str(threshold)]
+    return [parse_component_str(item) for item in entry.get("shared_components", [])]
+
+
+def output_path(output_dir: Path, model_name: str, method: str, granularity: str,
+                K: int, threshold: int, score_threshold=None, score_filter=None) -> Path:
+    model_slug = model_name.replace("/", "_")
+    if score_filter is not None:
+        stem = f"cross_task_{model_slug}_{method}_{granularity}_sf{score_filter}_p{threshold}"
+    elif score_threshold is not None:
+        stem = f"cross_task_{model_slug}_{method}_{granularity}_tau{score_threshold}_p{threshold}"
+    else:
+        stem = f"cross_task_{model_slug}_{method}_{granularity}_K{K}_p{threshold}"
+    return output_dir / f"{stem}.json"
+
+
+def valid_output(path: Path, tasks: list[str]) -> bool:
+    try:
+        data = json.loads(path.read_text())
+        matrix = data["cells"]
+        return (data.get("schema_version", 0) >= 2 and data.get("tasks") == tasks
+                and len(matrix) == len(tasks)
+                and all(len(matrix[src]) == len(tasks) for src in tasks)
+                and not data.get("skipped_donors") and not data.get("skipped_targets"))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return False
+
+
+def run_sweep(args):
+    tasks = [x.strip() for x in args.tasks.split(",") if x.strip()]
+    refresh = {x.strip() for x in (args.refresh_tasks or "").split(",") if x.strip()}
+    Ks = parse_int_list(args.K)
+    thresholds = parse_int_list(args.threshold)
+    out_dir = Path(args.output_dir) if args.output_dir else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    model = load_model_any(args.model_name, device=args.device, revision=args.hf_revision)
+    model.eval()
+    datasets, baseline = {}, {}
+    for task in tasks:
+        digits = args.digits if args.digits is not None and task == "addition" else 2
+        ds = apply_few_shot_prefix(list(get_dataset(task, num_examples=args.num_examples,
+                                                     digits=digits)), task, args.model_name)
+        datasets[task] = ds
+        correct, total = evaluate_accuracy(model, ds, task=task)
+        baseline[task] = {"correct": int(correct), "total": int(total),
+                          "accuracy": correct / total if total else float("nan")}
+
+    component_cache: dict[tuple[str, int, int], tuple[Component, ...]] = {}
+    metric_cache = {}
+    completed = 0
+    for K in Ks:
+        for threshold in thresholds:
+            path = output_path(out_dir, args.model_name, args.method, args.granularity,
+                               K, threshold, args.score_threshold, args.score_filter) if out_dir else None
+            existing = None
+            if path and valid_output(path, tasks):
+                if not refresh:
+                    completed += 1
+                    continue
+                existing = json.loads(path.read_text())
+                if refresh <= set(existing.get("refreshed", [])):
+                    completed += 1
+                    continue
+            skipped_donors, skipped_targets = [], []
+            for donor in tasks:
+                try:
+                    if donor not in metric_cache:
+                        metric_cache[donor] = find_metrics_file(
+                            args.results_dir, args.model_name, args.hf_revision, donor,
+                            threshold, args.score_threshold, args.score_filter,
+                            args.method, args.granularity)
+                    key = (donor, K, threshold)
+                    if key not in component_cache:
+                        component_cache[key] = tuple(load_shared_components(
+                            metric_cache[donor], K, threshold, args.score_threshold, args.score_filter))
+                except (FileNotFoundError, KeyError):
+                    skipped_donors.append(donor)
+
+            cells = {donor: {} for donor in tasks if donor not in skipped_donors}
+            for donor in tasks:
+                if donor in skipped_donors:
+                    continue
+                removed = component_cache[(donor, K, threshold)]
+                for target in tasks:
+                    if target in skipped_targets:
+                        continue
+                    if existing is not None and donor not in refresh and target not in refresh:
+                        cells[donor][target] = existing["cells"][donor][target]
+                        continue
+                    correct, total = evaluate_accuracy_with_ablation(
+                        model, datasets[target], task=target, removed=removed)
+                    base = baseline[target]
+                    acc = correct / total if total else float("nan")
+                    cells[donor][target] = {
+                        "baseline_correct": base["correct"], "baseline_total": base["total"],
+                        "baseline_accuracy": base["accuracy"],
+                        "ablated_correct": int(correct), "ablated_total": int(total),
+                        "ablated_accuracy": acc,
+                        "accuracy_drop_pp": (base["accuracy"] - acc) * 100 if total else float("nan"),
+                        "relative_drop_pct": ((base["accuracy"] - acc) / base["accuracy"] * 100
+                                              if base["accuracy"] else float("nan")),
+                        "evaluated_samples": int(total),
+                    }
+            result = {
+                "schema_version": 2, "model_name": args.model_name,
+                "hf_revision": args.hf_revision, "method": args.method,
+                "granularity": args.granularity, "K": K, "threshold": threshold,
+                "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
+                "baseline": baseline, "circuit_sizes": {
+                    donor: len(component_cache[(donor, K, threshold)])
+                    for donor in tasks if donor not in skipped_donors},
+                "skipped_donors": skipped_donors, "skipped_targets": skipped_targets,
+                "cells": cells,
+            }
+            if refresh:
+                result["refreshed"] = sorted(refresh | set(existing.get("refreshed", []) if existing else []))
+            if path:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(json.dumps(result, indent=2, allow_nan=False))
+                os.replace(tmp, path)
+            else:
+                print(json.dumps(result, indent=2, allow_nan=False))
+            completed += 1
+    print(f"[DONE] {completed}/{len(Ks) * len(thresholds)} matrices complete")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute cross-task ablation confusion matrix.")
-    parser.add_argument(
-        "--results-dir",
-        type=str,
-        required=True,
-        help="Root directory containing run subdirectories with metrics.json files.",
-    )
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        required=True,
-        help="Model name used in the experiments.",
-    )
-    parser.add_argument(
-        "--hf_revision",
-        type=str,
-        default=None,
-        help="Revision/tag of the model used in the experiments.",
-    )
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        required=True,
-        help="Comma-separated list of task names to include in the matrix.",
-    )
-    parser.add_argument(
-        "--K",
-        type=int,
-        default=10,
-        help="Top-K percentage used when constructing shared circuits (ignored when --score-threshold is set).",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=int,
-        default=100,
-        help="Reuse threshold percentage (p) used to define the shared circuit.",
-    )
-    parser.add_argument(
-        "--score-threshold",
-        type=float,
-        default=None,
-        help="Attribution score threshold τ (fraction of total signal). "
-             "When set, reads circuits from by_threshold instead of by_k.",
-    )
-    parser.add_argument(
-        "--score-filter",
-        type=float,
-        default=None,
-        dest="score_filter",
-        help="Score-filter threshold τ: reads circuits from by_score_filter (score_v >= τ·m(M,x)).",
-    )
-    parser.add_argument(
-        "--num-examples",
-        type=int,
-        default=100,
-        help="Number of examples to use for each task.",
-    )
-    parser.add_argument(
-        "--digits",
-        type=int,
-        default=None,
-        help="Number of digits for addition task (only used for addition).",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device on which to run evaluations.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for dataset generation (default: 42).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Directory to save output CSV and JSON. Prints CSV to stdout if not set.",
-    )
-    args = parser.parse_args()
-
-    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()]
-    results_dir = Path(args.results_dir)
-
-    random.seed(args.seed)
-
-    # Load model once
-    model = load_model_any(args.model_name, device=args.device, revision=args.hf_revision)
-    model.eval()
-
-    # Baseline accuracies per task (to avoid recomputation)
-    baseline_acc = {}
-    baseline_correct = {}
-    baseline_total = {}
-    # Datasets per task
-    datasets = {}
-    for task in tasks:
-        digits = args.digits if (args.digits and task == "addition") else 2
-        ds = get_dataset(task, num_examples=args.num_examples, digits=digits)
-        datasets[task] = apply_few_shot_prefix(list(ds), task, args.model_name)
-        bc, bt = evaluate_accuracy(model, datasets[task], task=task)
-        baseline_correct[task] = bc
-        baseline_total[task] = bt
-        baseline_acc[task] = bc / bt if bt > 0 else 0.0
-
-    # For each source task, load shared components and compute drops on all tasks
-    matrix_drop = {t: {} for t in tasks}       # raw accuracy drop (pp)
-    matrix_norm = {t: {} for t in tasks}       # drop / baseline (relative)
-    matrix_ablated = {t: {} for t in tasks}    # ablated accuracy
-    circuit_sizes = {}
-    skipped_tasks = set()
-    for src_task in tasks:
-        try:
-            metrics_path = find_metrics_file(
-                results_dir, args.model_name, args.hf_revision, src_task,
-                threshold=args.threshold, score_threshold=args.score_threshold,
-                score_filter=args.score_filter,
-            )
-        except FileNotFoundError:
-            print(f"[{src_task}] WARNING: no metrics found, skipping as source task")
-            skipped_tasks.add(src_task)
-            continue
-        shared_components = load_shared_components(
-            metrics_path, args.K, args.threshold,
-            score_threshold=args.score_threshold,
-            score_filter=args.score_filter,
-        )
-        circuit_sizes[src_task] = len(shared_components)
-        print(f"[{src_task}] Loaded {len(shared_components)} shared components")
-        for tgt_task in tasks:
-            correct, total = evaluate_accuracy_with_ablation(
-                model, datasets[tgt_task], task=tgt_task, removed=shared_components
-            )
-            acc = correct / total if total > 0 else 0.0
-            drop = baseline_acc[tgt_task] - acc
-            matrix_drop[src_task][tgt_task] = drop * 100.0
-            matrix_norm[src_task][tgt_task] = (drop / baseline_acc[tgt_task] * 100.0) if baseline_acc[tgt_task] > 0 else 0.0
-            matrix_ablated[src_task][tgt_task] = acc * 100.0
-            print(f"  -> {tgt_task}: baseline={baseline_acc[tgt_task]*100:.1f}% ablated={acc*100:.1f}% drop={drop*100:.1f}pp")
-
-    # Build CSV lines (only for tasks that had metrics)
-    active_tasks = [t for t in tasks if t not in skipped_tasks]
-    csv_lines = []
-    header = ["source_task"] + tasks
-    csv_lines.append(",".join(header))
-    for src_task in active_tasks:
-        row = [src_task] + [f"{matrix_drop[src_task][t]:.3f}" for t in tasks]
-        csv_lines.append(",".join(row))
-    csv_text = "\n".join(csv_lines) + "\n"
-
-    # Always print CSV to stdout
-    if skipped_tasks:
-        print(f"\n[WARNING] Skipped source tasks (no metrics): {', '.join(sorted(skipped_tasks))}")
-    print("\n=== Accuracy Drop (percentage points) ===")
-    print(csv_text)
-
-    print("=== Relative Drop (% of baseline) ===")
-    norm_header = ["source_task"] + tasks
-    print(",".join(norm_header))
-    for src_task in active_tasks:
-        row = [src_task] + [f"{matrix_norm[src_task][t]:.3f}" for t in tasks]
-        print(",".join(row))
-
-    # Save to output directory if specified
-    if args.output_dir:
-        out_dir = Path(args.output_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        model_slug = args.model_name.replace("/", "_")
-        if args.score_filter is not None:
-            prefix = f"cross_task_{model_slug}_sf{args.score_filter}_t{args.threshold}"
-        elif args.score_threshold is not None:
-            prefix = f"cross_task_{model_slug}_tau{args.score_threshold}_t{args.threshold}"
-        else:
-            prefix = f"cross_task_{model_slug}_K{args.K}_t{args.threshold}"
-
-        # Save CSV
-        csv_path = out_dir / f"{prefix}.csv"
-        csv_path.write_text(csv_text)
-        print(f"\n[SAVED] CSV: {csv_path}")
-
-        # Save structured JSON
-        output = {
-            "model_name": args.model_name,
-            "hf_revision": args.hf_revision,
-            "K": args.K,
-            "score_threshold": args.score_threshold,
-            "score_filter": args.score_filter,
-            "threshold": args.threshold,
-            "num_examples": args.num_examples,
-            "seed": args.seed,
-            "tasks": tasks,
-            "baseline_accuracy": {t: baseline_acc[t] for t in tasks},
-            "circuit_sizes": circuit_sizes,
-            "skipped_tasks": sorted(skipped_tasks),
-            "accuracy_drop_pp": {src: {tgt: matrix_drop[src][tgt] for tgt in tasks} for src in active_tasks},
-            "relative_drop_pct": {src: {tgt: matrix_norm[src][tgt] for tgt in tasks} for src in active_tasks},
-            "ablated_accuracy_pct": {src: {tgt: matrix_ablated[src][tgt] for tgt in tasks} for src in active_tasks},
-        }
-        json_path = out_dir / f"{prefix}.json"
-        with json_path.open("w") as f:
-            json.dump(output, f, indent=2)
-        print(f"[SAVED] JSON: {json_path}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--results-dir", required=True)
+    parser.add_argument("--model_name", required=True)
+    parser.add_argument("--hf_revision", default=None)
+    parser.add_argument("--tasks", required=True)
+    parser.add_argument("--K", default="10", help="integer or comma-separated list")
+    parser.add_argument("--threshold", default="100", help="integer or comma-separated list")
+    parser.add_argument("--method", default="eap")
+    parser.add_argument("--granularity", default="head_mlp")
+    parser.add_argument("--score-threshold", type=float, default=None)
+    parser.add_argument("--score-filter", type=float, default=None, dest="score_filter")
+    parser.add_argument("--num-examples", type=int, default=100)
+    parser.add_argument("--digits", type=int, default=None)
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--refresh-tasks", default=None,
+                        help="Comma-separated tasks whose cells (as donor or target) are recomputed; "
+                             "other cells are copied from the existing output file.")
+    run_sweep(parser.parse_args())
 
 
 if __name__ == "__main__":

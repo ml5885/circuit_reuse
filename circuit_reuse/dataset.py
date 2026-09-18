@@ -94,15 +94,17 @@ class BooleanDataset:
         py_expr = expr.replace("true", "True").replace("false", "False")
         return bool(eval(py_expr))  # nosec: B307 controlled vocab
 
-    def _corrupt_expr(self, expr: str) -> str:
-        literals = ["true", "false"]
-        found_literals = [(m.start(), m.end()) for m in re.finditer(r"\b(true|false)\b", expr)]
-        if not found_literals:
-            return expr
-        start, end = random.choice(found_literals)
-        original_literal = expr[start:end]
-        flipped_literal = "false" if original_literal == "true" else "true"
-        return expr[:start] + flipped_literal + expr[end:]
+    def _corrupt_expr(self, expr: str) -> str | None:
+        """Flip one literal so that the truth value changes; None if no single flip does."""
+        value = self._evaluate(expr)
+        spans = [(m.start(), m.end()) for m in re.finditer(r"\b(true|false)\b", expr)]
+        random.shuffle(spans)
+        for start, end in spans:
+            flipped = "false" if expr[start:end] == "true" else "true"
+            candidate = expr[:start] + flipped + expr[end:]
+            if self._evaluate(candidate) != value:
+                return candidate
+        return None
 
     def _generate_examples(self) -> None:
         self._examples = []
@@ -118,10 +120,12 @@ class BooleanDataset:
                 continue
             seen.add(expr)
 
+            corrupted_expr = self._corrupt_expr(expr)
+            if corrupted_expr is None:
+                continue
+
             prompt = f"Evaluate: {expr} = "
             target = str(self._evaluate(expr)).lower()
-
-            corrupted_expr = self._corrupt_expr(expr)
             corrupted_prompt = f"Evaluate: {corrupted_expr} = "
             corrupted_target = str(self._evaluate(corrupted_expr)).lower()
 
@@ -326,7 +330,7 @@ DATASET_DISPLAY_NAMES: dict[str, str] = {
     "ioi": "IOI",
     "mcqa": "CopyColors MCQA",
     "arc_easy": "ARC (Easy)",
-    "arc_challenge": "ARC (Challenge)",
+    "arc_challenge": "ARC (Chal.)",
 }
 
 MODEL_DISPLAY_NAMES: dict[str, str] = {

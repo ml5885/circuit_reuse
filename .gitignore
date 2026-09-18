@@ -52,10 +52,12 @@ scratch/
 
 OVERVIEW.md
 
-scripts/
+scripts/*
+!scripts/runpod/
+scripts/runpod/env.sh
 reference_code/
 tests/
 docs/
-paper/
+paper*/
 new_plots/
 *.png
