@@ -131,15 +131,12 @@ The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) pred
 
 Top-K selection ranks components by the stored score. Where the score is signed, the circuit therefore consists of the most positive components.
 
-## Rerunning on a rented GPU
+## References & acknowledgements
 
-`scripts/runpod/README.md` describes a one-pod-per-model rerun with email notification on failure, stall, and completion. The directory is not tracked; copy it to the pod by hand.
+This project builds on:
 
-## References
-
-- TransformerLens — https://github.com/TransformerLensOrg/TransformerLens
-- EAP / EAP-IG — Syed et al. 2023 (arXiv:2310.10348), Hanna et al. 2024; `circuit_reuse/graph.py` derives from https://github.com/hannamw/eap-ig
-- RelP — Jafari et al. 2025 (arXiv:2508.21258); `lrp_patch.py` ported from https://github.com/FarnoushRJ/RelP
-- Neuron basis — Arora et al. 2026 (arXiv:2601.22594)
-- Datasets — https://huggingface.co/mib-bench
-- LRP rules — LN-rule, AH-rule (Ali et al. 2022); Half-rule (Arras et al. 2019; Jafari et al. 2024)
+- [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens) — hook-based mechanistic-interpretability library; all forward passes and component hooks are TL primitives.
+- [eap-ig](https://github.com/hannamw/eap-ig) — our `eap` and `eap_ig` edge-graph paths (`circuit_reuse/graph.py`) are derived from this implementation of Edge Attribution Patching (Syed et al. 2023, [arXiv:2310.10348](https://arxiv.org/abs/2310.10348)).
+- [RelP (Jafari et al. 2025)](https://arxiv.org/abs/2508.21258) — the `relp` method and the LRP rules in `circuit_reuse/lrp_patch.py` are ported from the authors' TransformerLens fork at [FarnoushRJ/RelP](https://github.com/FarnoushRJ/RelP) (see `reference_code/RelP/`).
+- [ADAG / Arora et al. 2026](https://arxiv.org/abs/2601.22594) — "Language Model Circuits Are Sparse in the Neuron Basis." `--method relp --granularity neuron` reproduces their MLP-neuron-basis circuit scoring. The `reference_code/circuits/` directory vendors the ADAG library (Transluce) for comparison.
+- LRP propagation rules: LN-rule (Ali et al. 2022), AH-rule (Ali et al. 2022), Half-rule (Arras et al. 2019; Jafari et al. 2024).
