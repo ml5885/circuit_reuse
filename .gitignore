@@ -52,9 +52,7 @@ scratch/
 
 OVERVIEW.md
 
-scripts/*
-!scripts/runpod/
-scripts/runpod/env.sh
+scripts/
 reference_code/
 tests/
 docs/
