@@ -23,8 +23,8 @@ huggingface-cli login   # gemma-2 and llama-3.2 are gated
 | Path | Contents |
 |---|---|
 | `main_experiment.py` | Runs attribution and the within-task evaluation for one model, task, method and granularity. Writes `metrics.json`. |
-| `cross_task_experiment.py` | Builds the cross-task ablation matrix for every (K, P) setting. Writes one JSON file per setting. |
-| `cross_task_mean_ablation.py` | The same matrix with mean ablation instead of zero ablation. |
+| `cross_task_experiment.py` | Builds the cross-task ablation matrix for every (K, P) setting. Writes one JSON file per setting. `--ablation mean` swaps zero ablation for mean ablation. |
+| `cross_task_mean_ablation.py` | Older mean-ablation driver behind `results/cross_task_ablation_mean_k10` (EAP components only, schema v1). Superseded by `--ablation mean`. |
 | `selective_ablation_experiment.py` | For a task pair (A, B), ablates the shared core $C_A \cap C_B$ and the residuals $C_A \setminus C_B$ and $C_B \setminus C_A$ separately. |
 | `circuit_reuse/circuit_extraction.py` | `CircuitExtractor`, which implements EAP, EAP-IG and RelP at either granularity. |
 | `circuit_reuse/graph.py` | The edge graph used by `eap` and `eap_ig`. |
@@ -37,13 +37,13 @@ huggingface-cli login   # gemma-2 and llama-3.2 are gated
 
 ## Tasks
 
-| Task | Source | Counterfactual | Chance |
-|---|---|---|---|
-| `addition` | generated, `Compute: a + b = ` | different (a, b) | 0 |
-| `boolean` | generated, `Evaluate: <expr> = ` | one literal flipped so the value changes; expressions with no such literal resampled | 0.5 |
-| `ioi` | `mib-bench/ioi` | `s2_io_flip` (answer flips IO → S) | 0.5 |
-| `mcqa` | `mib-bench/copycolors_mcqa` | `answerPosition` | 0.25 |
-| `arc_easy`, `arc_challenge` | `mib-bench/arc_*` | `answerPosition` | 0.25 |
+| Task | Source | Counterfactual |
+|---|---|---|
+| `addition` | generated, `Compute: a + b = ` | different (a, b) |
+| `boolean` | generated, `Evaluate: <expr> = ` | one literal flipped so the value changes; expressions with no such literal resampled |
+| `ioi` | `mib-bench/ioi` | `s2_io_flip` (answer flips IO → S) |
+| `mcqa` | `mib-bench/copycolors_mcqa` | `answerPosition` |
+| `arc_easy`, `arc_challenge` | `mib-bench/arc_*` | `answerPosition` |
 
 Each run generates or reads `--num_examples` examples, shuffles them with `--seed`, and holds out `--val-fraction` of them for validation. `google/gemma-2-2b-it` receives a few-shot prefix on `addition`.
 
@@ -102,7 +102,8 @@ This reads every `metrics.json` and cross-task JSON under `--results-root` and w
 | `analysis/appendix_tables.py --method M --granularity G` | Appendix LaTeX tables. |
 | `analysis/review_plots.py [A1 ...]` | The analyses requested by the reviews that need no GPU. Writes `paper2/review_plots.md`. |
 | `analysis/pat_confound_checks.py` | Score-rule and top-K confound checks computed from the per-example caches. |
-| `analysis/zero_vs_mean_ablation.py`, `analysis/selective_ablation_summary.py` | Summaries of the mean-ablation and selective-ablation experiments. |
+| `analysis/zero_vs_mean_ablation_report.py [--config M_G --K 10 --P 50]` | Zero-vs-mean robustness figures and statistics; `--config` selects a granularity-parity configuration. |
+| `analysis/zero_vs_mean_ablation.py`, `analysis/selective_ablation_summary.py` | Summaries of the original mean-ablation and selective-ablation experiments. |
 
 The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) predate the tidy CSVs and read `metrics.json` files directly.
 
