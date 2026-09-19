@@ -1,11 +1,17 @@
 """Zero vs mean ablation: does the ablation choice change any finding?
 
-Loads the K=10, P=100 cross-task matrices produced under zero ablation
-(results/cross_task_ablation_k10) and mean ablation
-(results/cross_task_ablation_mean_k10), builds a tidy cell-level table, and
-writes plots and summary statistics to results2/zero_vs_mean_ablation.
+Loads cross-task matrices produced under zero and mean ablation, builds a
+tidy cell-level table, and writes plots and summary statistics.
+
+Without arguments it reads the original EAP component-level run at K=10,
+P=100 (results/cross_task_ablation_k10 and results/cross_task_ablation_mean_k10,
+schema v1) and writes to results2/zero_vs_mean_ablation. With ``--config
+<method>_<granularity>`` it reads the granularity-parity run (schema v2) at
+the given ``--K`` and ``--P`` from results/granularity_parity and writes to
+results2/zero_vs_mean_ablation_<config>_K<K>_P<P>.
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -30,10 +36,7 @@ plt.rcParams.update({
 })
 
 REPO = Path(__file__).resolve().parent.parent
-ZERO_DIR = REPO / "results" / "cross_task_ablation_k10"
-MEAN_DIR = REPO / "results" / "cross_task_ablation_mean_k10"
-OUT = REPO / "results2" / "zero_vs_mean_ablation"
-OUT.mkdir(parents=True, exist_ok=True)
+PARITY = REPO / "results" / "granularity_parity"
 
 TASKS = ["addition", "boolean", "ioi", "mcqa", "arc_easy", "arc_challenge"]
 TASK_LABEL = {"addition": "Addition", "boolean": "Boolean", "ioi": "IOI",
@@ -41,9 +44,9 @@ TASK_LABEL = {"addition": "Addition", "boolean": "Boolean", "ioi": "IOI",
 # Zissou1 / Darjeeling1 / Rushmore1
 TASK_COLORS = ["#F21A00", "#3B9AB2", "#E1AF00", "#00A08A", "#F98400", "#35274A"]
 # one hue per family, base model dark and instruct/larger model light
-MODEL_COLORS = ["#9A4F0A", "#E5A650",   # Gemma, FantasticFox1 orange
-                "#1F6E8C", "#78B7C5",   # Llama, Zissou1 blue
-                "#35274A", "#9986A5"]   # Qwen, Rushmore1 / IsleofDogs1 purple
+MODEL_COLORS = ["#F98400", "#F2AD00",   # Gemma, Darjeeling1 orange / gold
+                "#3B9AB2", "#5BBCD6",   # Llama, Zissou1 / Darjeeling1 blue
+                "#B40F20", "#FD6467"]   # Qwen, FantasticFox1 / GrandBudapest1 red
 MODELS = {
     "google/gemma-2-2b": "Gemma-2-2B",
     "google/gemma-2-2b-it": "Gemma-2-2B-IT",
@@ -55,8 +58,49 @@ MODELS = {
 # Wes Anderson palettes: Zissou1 for zero/mean and other, GrandBudapest1 for own
 C_ZERO, C_MEAN = "#3B9AB2", "#E1AF00"
 C_OWN, C_OTHER = "#FD6467", "#78B7C5"
-TITLE = "$K$=10%, $P$=100%"
 GAP_THRESHOLD = 5
+
+
+def configure(config, K, P):
+    """Resolve input files, output dir and plot title; drop models without a matrix."""
+    global MODELS, OUT, TITLE
+    if config is None:
+        zero_dir = REPO / "results" / "cross_task_ablation_k10"
+        mean_dir = REPO / "results" / "cross_task_ablation_mean_k10"
+        OUT = REPO / "results2" / "zero_vs_mean_ablation"
+        stem = lambda slug: f"cross_task_{slug}_K{K}_t{P}"
+        TITLE = f"EAP, components, $K$={K}%, $P$={P}%"
+    else:
+        zero_dir = PARITY / "granularity_parity_cross_task" / f"{config}_l40s"
+        mean_dir = PARITY / "granularity_parity_cross_task_mean" / config
+        OUT = REPO / "results2" / f"zero_vs_mean_ablation_{config}_K{K}_P{P}"
+        stem = lambda slug: f"cross_task_{slug}_{config}_K{K}_p{P}"
+        method = config.removesuffix("_neuron").removesuffix("_head_mlp")
+        granularity = "neurons" if config.endswith("_neuron") else "components"
+        TITLE = f"{METHOD_LABEL[method]}, {granularity}, $K$={K}%, $P$={P}%"
+    OUT.mkdir(parents=True, exist_ok=True)
+    files = {m: (zero_dir / f"{stem(m.replace('/', '_'))}.json",
+                 mean_dir / f"{stem(m.replace('/', '_'))}_meanabl.json") for m in MODELS}
+    missing = [m for m, (z, mn) in files.items() if not (z.exists() and mn.exists())]
+    if missing:
+        print(f"no matrix pair for {', '.join(missing)}; skipping")
+    MODELS = {m: MODELS[m] for m in MODELS if m not in missing}
+    return {m: files[m] for m in MODELS}
+
+
+METHOD_LABEL = {"eap": "EAP", "eap_ig": "EAP-IG", "relp": "RelP"}
+
+
+def read_matrix(path):
+    """Schema v1 (cross_task_mean_ablation.py / old runs) and v2 (cross_task_experiment.py)
+    both give circuit sizes, baseline accuracy per task and drop[source][target]."""
+    d = json.load(open(path))
+    if d.get("schema_version", 0) >= 2:
+        return dict(sizes=d["circuit_sizes"],
+                    base={t: d["baseline"][t]["accuracy"] for t in d["tasks"]},
+                    drop={s: {t: d["cells"][s][t]["accuracy_drop_pp"] for t in d["tasks"]}
+                          for s in d["tasks"]})
+    return dict(sizes=d["circuit_sizes"], base=d["baseline_accuracy"], drop=d["accuracy_drop_pp"])
 
 
 def save(fig, name):
@@ -66,23 +110,20 @@ def save(fig, name):
     print(f"saved {path}")
 
 
-def load_cells():
-    """Both JSONs index accuracy_drop_pp[source][target]; own and other drops
-    are grouped by target, as in granularity_parity.py."""
+def load_cells(files):
+    """Own and other drops are grouped by target, as in granularity_parity.py."""
     rows = []
-    for model in MODELS:
-        stem = f"cross_task_{model.replace('/', '_')}_K10_t100"
-        zero = json.load(open(ZERO_DIR / f"{stem}.json"))
-        mean = json.load(open(MEAN_DIR / f"{stem}_meanabl.json"))
+    for model, (zero_path, mean_path) in files.items():
+        zero, mean = read_matrix(zero_path), read_matrix(mean_path)
         for tgt in TASKS:
             for src in TASKS:
                 rows.append(dict(
                     model=model, target=tgt, source=src, diag=tgt == src,
-                    size=zero["circuit_sizes"][src],
-                    base_zero=100 * zero["baseline_accuracy"][tgt],
-                    base_mean=100 * mean["baseline_accuracy"][tgt],
-                    zero=zero["accuracy_drop_pp"][src][tgt],
-                    mean=mean["accuracy_drop_pp"][src][tgt],
+                    size=zero["sizes"][src],
+                    base_zero=100 * zero["base"][tgt],
+                    base_mean=100 * mean["base"][tgt],
+                    zero=zero["drop"][src][tgt],
+                    mean=mean["drop"][src][tgt],
                 ))
     df = pd.DataFrame(rows)
     df["delta"] = df["mean"] - df["zero"]
@@ -157,8 +198,15 @@ def plot_own_vs_other(summ):
     save(fig, "own_vs_other_scatter")
 
 
+def model_grid(**kw):
+    fig, axes = plt.subplots(2, 3, figsize=(9.5, 5.2), **kw)
+    for ax in axes.flat[len(MODELS):]:
+        ax.set_visible(False)
+    return fig, axes
+
+
 def plot_gap_by_model(summ):
-    fig, axes = plt.subplots(2, 3, figsize=(9.5, 5.2), sharex=True)
+    fig, axes = model_grid(sharex=True)
     for ax, model in zip(axes.flat, MODELS):
         s = summ[summ.model == model].set_index("target").loc[TASKS]
         y = np.arange(len(TASKS))[::-1]
@@ -178,7 +226,7 @@ def plot_gap_by_model(summ):
 
 
 def plot_necessity_bars(summ):
-    fig, axes = plt.subplots(2, 3, figsize=(9.5, 5.2), sharey=True)
+    fig, axes = model_grid(sharey=True)
     x = np.arange(len(TASKS)); w = .38
     for ax, model in zip(axes.flat, MODELS):
         s = summ[summ.model == model].set_index("target").loc[TASKS]
@@ -202,7 +250,7 @@ def plot_necessity_bars(summ):
 
 def plot_target_by_source(df, target, name):
     """Drop on one target task from each of the six circuits, zero vs mean, per model."""
-    fig, axes = plt.subplots(2, 3, figsize=(9.5, 5.2), sharey=True)
+    fig, axes = model_grid(sharey=True)
     x = np.arange(len(TASKS)); w = .38
     for ax, model in zip(axes.flat, MODELS):
         g = df[(df.model == model) & (df.target == target)].set_index("source").loc[TASKS]
@@ -271,7 +319,15 @@ def compute_stats(df, summ, paired):
 
 
 def main():
-    df = load_cells()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=None,
+                        help="granularity-parity configuration, e.g. eap_ig_neuron; "
+                             "omit for the original EAP component-level run")
+    parser.add_argument("--K", type=int, default=10)
+    parser.add_argument("--P", type=int, default=None, help="default 100, or 50 with --config")
+    args = parser.parse_args()
+    P = args.P if args.P is not None else (50 if args.config else 100)
+    df = load_cells(configure(args.config, args.K, P))
     summ = summarise(df)
     df.to_csv(OUT / "cells_tidy.csv", index=False)
     summ.to_csv(OUT / "per_target_summary.csv", index=False)

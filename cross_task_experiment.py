@@ -3,6 +3,10 @@
 One invocation loads one model and one dataset per task, then evaluates the
 complete ``K x p`` grid.  Outputs are one resumable JSON matrix per setting.
 The old scalar CLI remains valid (``--K 10 --threshold 100``).
+
+``--ablation mean`` replaces each removed component with its mean activation
+over the target task's corrupted prompts (Wang et al. 2022, Miller et al.
+2024) instead of zero; outputs then carry a ``_meanabl`` suffix.
 """
 from __future__ import annotations
 
@@ -17,7 +21,12 @@ import torch
 
 from models.olmo_adapter import load_model_any
 from circuit_reuse.dataset import get_dataset, apply_few_shot_prefix
-from circuit_reuse.evaluate import evaluate_accuracy_with_ablation, evaluate_accuracy
+from circuit_reuse.evaluate import (
+    compute_corrupted_means,
+    evaluate_accuracy,
+    evaluate_accuracy_with_ablation,
+    evaluate_accuracy_with_mean_ablation,
+)
 from circuit_reuse.circuit_extraction import Component
 
 
@@ -104,7 +113,8 @@ def load_shared_components(metrics_path: Path, K: int, threshold: int,
 
 
 def output_path(output_dir: Path, model_name: str, method: str, granularity: str,
-                K: int, threshold: int, score_threshold=None, score_filter=None) -> Path:
+                K: int, threshold: int, score_threshold=None, score_filter=None,
+                ablation: str = "zero") -> Path:
     model_slug = model_name.replace("/", "_")
     if score_filter is not None:
         stem = f"cross_task_{model_slug}_{method}_{granularity}_sf{score_filter}_p{threshold}"
@@ -112,6 +122,8 @@ def output_path(output_dir: Path, model_name: str, method: str, granularity: str
         stem = f"cross_task_{model_slug}_{method}_{granularity}_tau{score_threshold}_p{threshold}"
     else:
         stem = f"cross_task_{model_slug}_{method}_{granularity}_K{K}_p{threshold}"
+    if ablation == "mean":
+        stem += "_meanabl"
     return output_dir / f"{stem}.json"
 
 
@@ -147,6 +159,8 @@ def run_sweep(args):
         correct, total = evaluate_accuracy(model, ds, task=task)
         baseline[task] = {"correct": int(correct), "total": int(total),
                           "accuracy": correct / total if total else float("nan")}
+    means = ({task: compute_corrupted_means(model, datasets[task]) for task in tasks}
+             if args.ablation == "mean" else None)
 
     component_cache: dict[tuple[str, int, int], tuple[Component, ...]] = {}
     metric_cache = {}
@@ -154,7 +168,8 @@ def run_sweep(args):
     for K in Ks:
         for threshold in thresholds:
             path = output_path(out_dir, args.model_name, args.method, args.granularity,
-                               K, threshold, args.score_threshold, args.score_filter) if out_dir else None
+                               K, threshold, args.score_threshold, args.score_filter,
+                               args.ablation) if out_dir else None
             existing = None
             if path and valid_output(path, tasks):
                 if not refresh:
@@ -190,9 +205,16 @@ def run_sweep(args):
                     if existing is not None and donor not in refresh and target not in refresh:
                         cells[donor][target] = existing["cells"][donor][target]
                         continue
-                    correct, total = evaluate_accuracy_with_ablation(
-                        model, datasets[target], task=target, removed=removed)
                     base = baseline[target]
+                    if not removed:  # empty circuit: ablating nothing is the baseline
+                        correct, total = base["correct"], base["total"]
+                    elif means is None:
+                        correct, total = evaluate_accuracy_with_ablation(
+                            model, datasets[target], task=target, removed=removed)
+                    else:
+                        correct, total = evaluate_accuracy_with_mean_ablation(
+                            model, datasets[target], task=target, removed=removed,
+                            means=means[target])
                     acc = correct / total if total else float("nan")
                     cells[donor][target] = {
                         "baseline_correct": base["correct"], "baseline_total": base["total"],
@@ -207,8 +229,8 @@ def run_sweep(args):
             result = {
                 "schema_version": 2, "model_name": args.model_name,
                 "hf_revision": args.hf_revision, "method": args.method,
-                "granularity": args.granularity, "K": K, "threshold": threshold,
-                "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
+                "granularity": args.granularity, "ablation": args.ablation,
+                "K": K, "threshold": threshold, "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
                 "baseline": baseline, "circuit_sizes": {
                     donor: len(component_cache[(donor, K, threshold)])
                     for donor in tasks if donor not in skipped_donors},
@@ -237,6 +259,9 @@ def main():
     parser.add_argument("--threshold", default="100", help="integer or comma-separated list")
     parser.add_argument("--method", default="eap")
     parser.add_argument("--granularity", default="head_mlp")
+    parser.add_argument("--ablation", choices=("zero", "mean"), default="zero",
+                        help="mean: replace removed components with their mean activation "
+                             "over the target task's corrupted prompts")
     parser.add_argument("--score-threshold", type=float, default=None)
     parser.add_argument("--score-filter", type=float, default=None, dest="score_filter")
     parser.add_argument("--num-examples", type=int, default=100)

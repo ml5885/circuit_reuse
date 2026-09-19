@@ -54,7 +54,8 @@ def read_cross_task(root: Path) -> pd.DataFrame:
         try:
             data = json.loads(path.read_text())
             tasks = [t for t in data["tasks"] if t not in EXCLUDED_TASKS]
-            if data.get("schema_version", 0) < 2 or data.get("skipped_donors"):
+            if (data.get("schema_version", 0) < 2 or data.get("skipped_donors")
+                    or data.get("ablation", "zero") != "zero"):
                 continue
             if _excluded(data["model_name"], None):
                 continue
