@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -12,7 +13,20 @@ try:
 except Exception:
     pass
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+
+
+def _rope_theta(self):
+    params = getattr(self, "rope_parameters", None) or {}
+    if "rope_theta" not in params:
+        raise AttributeError("rope_theta")
+    return params["rope_theta"]
+
+
+if not hasattr(PretrainedConfig, "rope_theta"):
+    # transformers 5 moved rope_theta into rope_parameters; transformer-lens 2.16
+    # still reads hf_config.rope_theta when converting Qwen3 configs.
+    PretrainedConfig.rope_theta = property(_rope_theta)
 
 
 Hook = Tuple[str, Callable[[torch.Tensor, Any], Optional[torch.Tensor]]]
@@ -263,6 +277,23 @@ class HFHookedOLMo:
                 self._persist_handles.append(block.register_forward_hook(_block_fwd))
 
 
+def _tokenizer_with_bos(name: str):
+    """The tokenizer HookedTransformer would build itself (add_bos_token=True).
+
+    transformers 5 rejects add_bos_token=True for tokenizers without a BOS token
+    (Qwen). Loading plainly and recording the flag in init_kwargs makes
+    transformer-lens keep the tokenizer as is and prepend bos (= eos) itself,
+    which is what it did with transformers 4.
+    """
+    kwargs = dict(trust_remote_code=True, token=os.environ.get("HF_TOKEN") or None)
+    try:
+        return AutoTokenizer.from_pretrained(name, add_bos_token=True, **kwargs)
+    except ValueError:
+        tok = AutoTokenizer.from_pretrained(name, **kwargs)
+        tok.init_kwargs["add_bos_token"] = True
+        return tok
+
+
 def load_model_any(
     model_name: str,
     device: str,
@@ -271,9 +302,11 @@ def load_model_any(
 ):
     try:
         from transformer_lens import HookedTransformer
+        from transformer_lens.loading_from_pretrained import get_official_model_name
         print(f"[INFO] Loading model '{model_name}' using HookedTransformer...")
         m = HookedTransformer.from_pretrained(
-            model_name, trust_remote_code=True, torch_dtype=torch_dtype
+            model_name, trust_remote_code=True, torch_dtype=torch_dtype,
+            tokenizer=_tokenizer_with_bos(get_official_model_name(model_name)),
         ).to(device).eval()
         return m
     except Exception:
