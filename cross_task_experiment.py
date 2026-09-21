@@ -4,9 +4,12 @@ One invocation loads one model and one dataset per task, then evaluates the
 complete ``K x p`` grid.  Outputs are one resumable JSON matrix per setting.
 The old scalar CLI remains valid (``--K 10 --threshold 100``).
 
-``--ablation mean`` replaces each removed component with its mean activation
-over the target task's corrupted prompts (Wang et al. 2022, Miller et al.
-2024) instead of zero; outputs then carry a ``_meanabl`` suffix.
+``--ablation`` selects one or more ablations, computed in one process on the
+same evaluation examples: ``zero``; ``mean``, which replaces each removed
+component with its activation averaged over positions and over the target
+task's corrupted prompts (Wang et al. 2022, Miller et al. 2024); and
+``mean_pos``, which averages per token position. Outputs carry the suffixes
+``_meanabl`` and ``_meanabl_pos``.
 """
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import random
 from pathlib import Path
 from typing import Iterable
 
@@ -122,8 +126,7 @@ def output_path(output_dir: Path, model_name: str, method: str, granularity: str
         stem = f"cross_task_{model_slug}_{method}_{granularity}_tau{score_threshold}_p{threshold}"
     else:
         stem = f"cross_task_{model_slug}_{method}_{granularity}_K{K}_p{threshold}"
-    if ablation == "mean":
-        stem += "_meanabl"
+    stem += {"zero": "", "mean": "_meanabl", "mean_pos": "_meanabl_pos"}[ablation]
     return output_dir / f"{stem}.json"
 
 
@@ -142,12 +145,16 @@ def valid_output(path: Path, tasks: list[str]) -> bool:
 def run_sweep(args):
     tasks = [x.strip() for x in args.tasks.split(",") if x.strip()]
     refresh = {x.strip() for x in (args.refresh_tasks or "").split(",") if x.strip()}
+    ablations = [x.strip() for x in args.ablation.split(",") if x.strip()]
     Ks = parse_int_list(args.K)
     thresholds = parse_int_list(args.threshold)
     out_dir = Path(args.output_dir) if args.output_dir else None
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # The generated tasks (addition, boolean) draw their examples from the global RNG.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
     model = load_model_any(args.model_name, device=args.device, revision=args.hf_revision)
     model.eval()
     datasets, baseline = {}, {}
@@ -159,94 +166,94 @@ def run_sweep(args):
         correct, total = evaluate_accuracy(model, ds, task=task)
         baseline[task] = {"correct": int(correct), "total": int(total),
                           "accuracy": correct / total if total else float("nan")}
-    means = ({task: compute_corrupted_means(model, datasets[task]) for task in tasks}
-             if args.ablation == "mean" else None)
+    means = {ab: {task: compute_corrupted_means(model, datasets[task], per_position=ab == "mean_pos")
+                  for task in tasks}
+             for ab in ablations if ab != "zero"}
 
     component_cache: dict[tuple[str, int, int], tuple[Component, ...]] = {}
     metric_cache = {}
     completed = 0
-    for K in Ks:
-        for threshold in thresholds:
-            path = output_path(out_dir, args.model_name, args.method, args.granularity,
-                               K, threshold, args.score_threshold, args.score_filter,
-                               args.ablation) if out_dir else None
-            existing = None
-            if path and valid_output(path, tasks):
-                if not refresh:
-                    completed += 1
-                    continue
-                existing = json.loads(path.read_text())
-                if refresh <= set(existing.get("refreshed", [])):
-                    completed += 1
-                    continue
-            skipped_donors, skipped_targets = [], []
-            for donor in tasks:
-                try:
-                    if donor not in metric_cache:
-                        metric_cache[donor] = find_metrics_file(
-                            args.results_dir, args.model_name, args.hf_revision, donor,
-                            threshold, args.score_threshold, args.score_filter,
-                            args.method, args.granularity)
-                    key = (donor, K, threshold)
-                    if key not in component_cache:
-                        component_cache[key] = tuple(load_shared_components(
-                            metric_cache[donor], K, threshold, args.score_threshold, args.score_filter))
-                except (FileNotFoundError, KeyError):
-                    skipped_donors.append(donor)
+    for K, threshold, ablation in ((K, t, ab) for K in Ks for t in thresholds for ab in ablations):
+        path = output_path(out_dir, args.model_name, args.method, args.granularity,
+                           K, threshold, args.score_threshold, args.score_filter,
+                           ablation) if out_dir else None
+        existing = None
+        if path and valid_output(path, tasks):
+            if not refresh:
+                completed += 1
+                continue
+            existing = json.loads(path.read_text())
+            if refresh <= set(existing.get("refreshed", [])):
+                completed += 1
+                continue
+        skipped_donors, skipped_targets = [], []
+        for donor in tasks:
+            try:
+                if donor not in metric_cache:
+                    metric_cache[donor] = find_metrics_file(
+                        args.results_dir, args.model_name, args.hf_revision, donor,
+                        threshold, args.score_threshold, args.score_filter,
+                        args.method, args.granularity)
+                key = (donor, K, threshold)
+                if key not in component_cache:
+                    component_cache[key] = tuple(load_shared_components(
+                        metric_cache[donor], K, threshold, args.score_threshold, args.score_filter))
+            except (FileNotFoundError, KeyError):
+                skipped_donors.append(donor)
 
-            cells = {donor: {} for donor in tasks if donor not in skipped_donors}
-            for donor in tasks:
-                if donor in skipped_donors:
+        cells = {donor: {} for donor in tasks if donor not in skipped_donors}
+        for donor in tasks:
+            if donor in skipped_donors:
+                continue
+            removed = component_cache[(donor, K, threshold)]
+            for target in tasks:
+                if target in skipped_targets:
                     continue
-                removed = component_cache[(donor, K, threshold)]
-                for target in tasks:
-                    if target in skipped_targets:
-                        continue
-                    if existing is not None and donor not in refresh and target not in refresh:
-                        cells[donor][target] = existing["cells"][donor][target]
-                        continue
-                    base = baseline[target]
-                    if not removed:  # empty circuit: ablating nothing is the baseline
-                        correct, total = base["correct"], base["total"]
-                    elif means is None:
-                        correct, total = evaluate_accuracy_with_ablation(
-                            model, datasets[target], task=target, removed=removed)
-                    else:
-                        correct, total = evaluate_accuracy_with_mean_ablation(
-                            model, datasets[target], task=target, removed=removed,
-                            means=means[target])
-                    acc = correct / total if total else float("nan")
-                    cells[donor][target] = {
-                        "baseline_correct": base["correct"], "baseline_total": base["total"],
-                        "baseline_accuracy": base["accuracy"],
-                        "ablated_correct": int(correct), "ablated_total": int(total),
-                        "ablated_accuracy": acc,
-                        "accuracy_drop_pp": (base["accuracy"] - acc) * 100 if total else float("nan"),
-                        "relative_drop_pct": ((base["accuracy"] - acc) / base["accuracy"] * 100
-                                              if base["accuracy"] else float("nan")),
-                        "evaluated_samples": int(total),
-                    }
-            result = {
-                "schema_version": 2, "model_name": args.model_name,
-                "hf_revision": args.hf_revision, "method": args.method,
-                "granularity": args.granularity, "ablation": args.ablation,
-                "K": K, "threshold": threshold, "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
-                "baseline": baseline, "circuit_sizes": {
-                    donor: len(component_cache[(donor, K, threshold)])
-                    for donor in tasks if donor not in skipped_donors},
-                "skipped_donors": skipped_donors, "skipped_targets": skipped_targets,
-                "cells": cells,
-            }
-            if refresh:
-                result["refreshed"] = sorted(refresh | set(existing.get("refreshed", []) if existing else []))
-            if path:
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                tmp.write_text(json.dumps(result, indent=2, allow_nan=False))
-                os.replace(tmp, path)
-            else:
-                print(json.dumps(result, indent=2, allow_nan=False))
-            completed += 1
-    print(f"[DONE] {completed}/{len(Ks) * len(thresholds)} matrices complete")
+                if existing is not None and donor not in refresh and target not in refresh:
+                    cells[donor][target] = existing["cells"][donor][target]
+                    continue
+                base = baseline[target]
+                if not removed:  # empty circuit: ablating nothing is the baseline
+                    correct, total = base["correct"], base["total"]
+                elif ablation == "zero":
+                    correct, total = evaluate_accuracy_with_ablation(
+                        model, datasets[target], task=target, removed=removed)
+                else:
+                    correct, total = evaluate_accuracy_with_mean_ablation(
+                        model, datasets[target], task=target, removed=removed,
+                        means=means[ablation][target])
+                acc = correct / total if total else float("nan")
+                cells[donor][target] = {
+                    "baseline_correct": base["correct"], "baseline_total": base["total"],
+                    "baseline_accuracy": base["accuracy"],
+                    "ablated_correct": int(correct), "ablated_total": int(total),
+                    "ablated_accuracy": acc,
+                    "accuracy_drop_pp": (base["accuracy"] - acc) * 100 if total else float("nan"),
+                    "relative_drop_pct": ((base["accuracy"] - acc) / base["accuracy"] * 100
+                                          if base["accuracy"] else float("nan")),
+                    "evaluated_samples": int(total),
+                }
+        result = {
+            "schema_version": 2, "model_name": args.model_name,
+            "hf_revision": args.hf_revision, "method": args.method,
+            "granularity": args.granularity, "ablation": ablation,
+            "K": K, "threshold": threshold, "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
+            "baseline": baseline, "circuit_sizes": {
+                donor: len(component_cache[(donor, K, threshold)])
+                for donor in tasks if donor not in skipped_donors},
+            "skipped_donors": skipped_donors, "skipped_targets": skipped_targets,
+            "cells": cells,
+        }
+        if refresh:
+            result["refreshed"] = sorted(refresh | set(existing.get("refreshed", []) if existing else []))
+        if path:
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(result, indent=2, allow_nan=False))
+            os.replace(tmp, path)
+        else:
+            print(json.dumps(result, indent=2, allow_nan=False))
+        completed += 1
+    print(f"[DONE] {completed}/{len(Ks) * len(thresholds) * len(ablations)} matrices complete")
 
 
 def main():
@@ -259,9 +266,9 @@ def main():
     parser.add_argument("--threshold", default="100", help="integer or comma-separated list")
     parser.add_argument("--method", default="eap")
     parser.add_argument("--granularity", default="head_mlp")
-    parser.add_argument("--ablation", choices=("zero", "mean"), default="zero",
-                        help="mean: replace removed components with their mean activation "
-                             "over the target task's corrupted prompts")
+    parser.add_argument("--ablation", default="zero",
+                        help="comma-separated subset of zero, mean, mean_pos; all are evaluated "
+                             "in one process on the same examples")
     parser.add_argument("--score-threshold", type=float, default=None)
     parser.add_argument("--score-filter", type=float, default=None, dest="score_filter")
     parser.add_argument("--num-examples", type=int, default=100)

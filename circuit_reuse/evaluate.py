@@ -58,94 +58,71 @@ def compute_corrupted_means(
     model: Any,
     dataset: Iterable[Example],
     layers: Optional[Iterable[int]] = None,
+    per_position: bool = False,
 ) -> Dict[str, "torch.Tensor"]:
-    """Compute mean activations of attention heads and MLP layers over the
-    corrupted version of the given dataset.
+    """Mean activations of heads, MLP outputs and MLP neurons over the corrupted
+    prompts of ``dataset`` (Wang et al. 2022, Miller et al. 2024).
 
-    Following Wang et al. 2022 and Miller et al. 2024, means are computed on
-    a corrupted distribution so the replaced activation stays on-distribution
-    but no longer carries example-specific information.
-
-    Returns a dict with keys::
-        f"z_L{layer}"        -> Tensor of shape (n_heads, d_head)
-        f"mlp_out_L{layer}"  -> Tensor of shape (d_model,)
-
-    Means are accumulated across (batch, sequence_position), so the same
-    scalar mean is broadcast across every token position at ablation time.
+    Keys are ``z_L{layer}`` (n_heads, d_head), ``mlp_out_L{layer}`` (d_model,) and
+    ``neuron_post_L{layer}`` (d_mlp,). With ``per_position`` every tensor gains a
+    leading position axis, holding the mean at each token position over the
+    prompts that reach it; ``means["_pooled"]`` then carries the position-averaged
+    means for positions beyond the longest reference prompt. A pooled mean written
+    into every position is off-distribution for neurons that fire only at one
+    position, such as the massive-activation neurons at the first token.
     """
-    n_layers = model.cfg.n_layers
-    if layers is None:
-        layers = range(n_layers)
-    layer_set = set(int(l) for l in layers)
+    layer_set = set(range(model.cfg.n_layers) if layers is None else (int(l) for l in layers))
+    hook_names = {"z": "attn.hook_z", "mlp_out": "hook_mlp_out", "neuron_post": "mlp.hook_post"}
+    sums: Dict[str, torch.Tensor] = {}
+    counts: Dict[str, torch.Tensor] = {}
 
-    head_sums: Dict[int, torch.Tensor] = {}
-    head_counts: Dict[int, int] = {}
-    mlp_sums: Dict[int, torch.Tensor] = {}
-    mlp_counts: Dict[int, int] = {}
-    neuron_sums: Dict[int, torch.Tensor] = {}
-    neuron_counts: Dict[int, int] = {}
-
-    def make_head_hook(layer):
-        def hook(act, hook=None, layer=layer):
-            flat = act.reshape(-1, act.shape[-2], act.shape[-1])
-            s = flat.sum(dim=0)
-            if layer not in head_sums:
-                head_sums[layer] = s.detach().clone().float()
-                head_counts[layer] = flat.shape[0]
-            else:
-                head_sums[layer] += s.detach().float()
-                head_counts[layer] += flat.shape[0]
+    def make_hook(key):
+        def hook(act, hook=None):
+            a = act.detach().float()  # (batch, pos, ...)
+            n = a.shape[1]
+            if key not in sums:
+                sums[key] = torch.zeros((0,) + a.shape[2:], device=a.device)
+                counts[key] = torch.zeros(0, device=a.device)
+            if n > sums[key].shape[0]:
+                pad = n - sums[key].shape[0]
+                sums[key] = torch.cat([sums[key], torch.zeros((pad,) + a.shape[2:], device=a.device)])
+                counts[key] = torch.cat([counts[key], torch.zeros(pad, device=a.device)])
+            sums[key][:n] += a.sum(dim=0)
+            counts[key][:n] += a.shape[0]
             return act
         return hook
 
-    def make_mlp_hook(layer):
-        def hook(act, hook=None, layer=layer):
-            flat = act.reshape(-1, act.shape[-1])
-            s = flat.sum(dim=0)
-            if layer not in mlp_sums:
-                mlp_sums[layer] = s.detach().clone().float()
-                mlp_counts[layer] = flat.shape[0]
-            else:
-                mlp_sums[layer] += s.detach().float()
-                mlp_counts[layer] += flat.shape[0]
-            return act
-        return hook
-
-    def make_neuron_hook(layer):
-        def hook(act, hook=None, layer=layer):
-            flat = act.reshape(-1, act.shape[-1])
-            s = flat.sum(dim=0)
-            if layer not in neuron_sums:
-                neuron_sums[layer] = s.detach().clone().float()
-                neuron_counts[layer] = flat.shape[0]
-            else:
-                neuron_sums[layer] += s.detach().float()
-                neuron_counts[layer] += flat.shape[0]
-            return act
-        return hook
-
-    hooks: List[Tuple[str, callable]] = []
-    for layer in layer_set:
-        hooks.append((f"blocks.{layer}.attn.hook_z", make_head_hook(layer)))
-        hooks.append((f"blocks.{layer}.hook_mlp_out", make_mlp_hook(layer)))
-        hooks.append((f"blocks.{layer}.mlp.hook_post", make_neuron_hook(layer)))
-
-    device = model.cfg.device
+    hooks = [(f"blocks.{layer}.{name}", make_hook(f"{key}_L{layer}"))
+             for layer in layer_set for key, name in hook_names.items()]
     model.eval()
     with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
         for ex in dataset:
-            tokens = model.to_tokens(ex.corrupted_prompt, prepend_bos=True).to(device)
-            model(tokens)
+            model(model.to_tokens(ex.corrupted_prompt, prepend_bos=True).to(model.cfg.device))
 
     means: Dict[str, torch.Tensor] = {}
-    for layer in layer_set:
-        if layer in head_sums:
-            means[f"z_L{layer}"] = head_sums[layer] / max(head_counts[layer], 1)
-        if layer in mlp_sums:
-            means[f"mlp_out_L{layer}"] = mlp_sums[layer] / max(mlp_counts[layer], 1)
-        if layer in neuron_sums:
-            means[f"neuron_post_L{layer}"] = neuron_sums[layer] / max(neuron_counts[layer], 1)
+    pooled: Dict[str, torch.Tensor] = {}
+    for key, total in sums.items():
+        c = counts[key]
+        shape = (-1,) + (1,) * (total.ndim - 1)
+        pooled[key] = total.sum(dim=0) / c.sum().clamp(min=1)
+        means[key] = total / c.clamp(min=1).view(shape) if per_position else pooled[key]
+    if per_position:
+        means["_pooled"] = pooled
     return means
+
+
+def _select_mean(means: Dict[str, "torch.Tensor"], key: str, positions: int) -> "torch.Tensor":
+    """The cached mean for ``key`` with a leading axis of length ``positions``:
+    the per-position means where the reference prompts reach, the pooled mean beyond."""
+    mean = means.get(key)
+    if mean is None:
+        raise KeyError(f"No mean cached for {key}")
+    if "_pooled" not in means:
+        return mean.unsqueeze(0).expand(positions, *mean.shape)
+    if positions <= mean.shape[0]:
+        return mean[:positions]
+    tail = means["_pooled"][key].unsqueeze(0).expand(positions - mean.shape[0], *mean.shape[1:])
+    return torch.cat([mean, tail])
 
 
 def _build_mean_ablation_hooks(
@@ -168,38 +145,24 @@ def _build_mean_ablation_hooks(
     hooks: List[Tuple[str, callable]] = []
 
     for layer, indices in heads_by_layer.items():
-        mean_z = means.get(f"z_L{layer}")
-        if mean_z is None:
-            raise KeyError(f"No mean cached for z_L{layer}")
-        idx = torch.tensor(indices, device=mean_z.device)
-        # mean_z: (n_heads, d_head). Select the ablated heads -> (len(idx), d_head).
-        mean_sel = mean_z.index_select(0, idx)
-        def hook_heads(act, hook=None, idx=idx, mean_sel=mean_sel):
-            idx_cast = idx.to(device=act.device)
-            mean_cast = mean_sel.to(device=act.device, dtype=act.dtype)
-            act[:, :, idx_cast, :] = mean_cast[None, None, :, :]
+        idx = torch.tensor(indices)
+        def hook_heads(act, hook=None, idx=idx, key=f"z_L{layer}"):
+            mean = _select_mean(means, key, act.shape[1]).to(device=act.device, dtype=act.dtype)
+            act[:, :, idx.to(act.device), :] = mean[:, idx.to(mean.device), :][None]
             return act
         hooks.append((f"blocks.{layer}.attn.hook_z", hook_heads))
 
     for layer in mlp_layers:
-        mean_m = means.get(f"mlp_out_L{layer}")
-        if mean_m is None:
-            raise KeyError(f"No mean cached for mlp_out_L{layer}")
-        def hook_mlp(act, hook=None, mean_m=mean_m):
-            mean_cast = mean_m.to(device=act.device, dtype=act.dtype)
-            act[:, :, :] = mean_cast[None, None, :]
+        def hook_mlp(act, hook=None, key=f"mlp_out_L{layer}"):
+            act[:, :, :] = _select_mean(means, key, act.shape[1]).to(device=act.device, dtype=act.dtype)[None]
             return act
         hooks.append((f"blocks.{layer}.hook_mlp_out", hook_mlp))
 
     for layer, indices in neurons_by_layer.items():
-        mean_n = means.get(f"neuron_post_L{layer}")
-        if mean_n is None:
-            raise KeyError(f"No mean cached for neuron_post_L{layer}")
-        idx = torch.tensor(indices, device=mean_n.device)
-        mean_sel = mean_n.index_select(0, idx)
-        def hook_neurons(act, hook=None, idx=idx, mean_sel=mean_sel):
-            idx_cast = idx.to(device=act.device)
-            act[:, :, idx_cast] = mean_sel.to(device=act.device, dtype=act.dtype)[None, None, :]
+        idx = torch.tensor(indices)
+        def hook_neurons(act, hook=None, idx=idx, key=f"neuron_post_L{layer}"):
+            mean = _select_mean(means, key, act.shape[1]).to(device=act.device, dtype=act.dtype)
+            act[:, :, idx.to(act.device)] = mean[:, idx.to(mean.device)][None]
             return act
         hooks.append((f"blocks.{layer}.mlp.hook_post", hook_neurons))
 
