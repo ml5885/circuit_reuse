@@ -17,6 +17,7 @@ from circuit_reuse.circuit_extraction import (
     CircuitExtractor,
     Component,
 )
+from circuit_reuse.lrp_patch import DEFAULT_LRP_RULES, lrp_rules_tag
 from circuit_reuse.evaluate import (
     evaluate_accuracy,
     evaluate_predictions,
@@ -119,8 +120,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lrp-rules",
         type=str,
-        default="LN-rule,AH-rule,Half-rule",
-        help="Comma-separated LRP rules to apply. Default: LN-rule,AH-rule,Half-rule.",
+        default=",".join(DEFAULT_LRP_RULES),
+        help=f"Comma-separated LRP rules to apply. Default: {','.join(DEFAULT_LRP_RULES)} "
+             "(Arora et al. 2026). The pre-2026-09-21 set was LN-rule,AH-rule,Half-rule.",
     )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--debug", action="store_true")
@@ -448,8 +450,12 @@ def _run_single_combination(
     gran_suffix = "" if granularity == "head_mlp" else f"__g{granularity}"
     method_suffix = f"{method}__ig{ig_steps}" if method == "eap_ig" else method
     metric_suffix = "" if task_metric == "logprob" else f"__tm{task_metric}"
+    # RelP caches are keyed by rule set: files without a tag predate 2026-09-21
+    # and hold LEGACY_LRP_RULES scores, so they are never reused.
+    lrp_active = method == "relp" if use_lrp is None else use_lrp
+    rules_suffix = f"__lrp{lrp_rules_tag(lrp_rules or DEFAULT_LRP_RULES)}" if lrp_active else ""
     attrib_name = (
-        f"{model_name.replace('/', '_')}__{hf_revision or 'none'}__{task}__{method_suffix}{metric_suffix}{gran_suffix}__"
+        f"{model_name.replace('/', '_')}__{hf_revision or 'none'}__{task}__{method_suffix}{metric_suffix}{gran_suffix}{rules_suffix}__"
         f"n{num_examples}__d{digits_str}__s{seed}.jsonl"
     )
     attrib_path = cache_dir / attrib_name
@@ -554,6 +560,7 @@ def _run_single_combination(
         "granularity": granularity,
         "task_metric": task_metric,
         "ig_steps": int(ig_steps) if method == "eap_ig" else None,
+        "lrp_rules": list(lrp_rules or DEFAULT_LRP_RULES) if lrp_active else None,
         "top_k_list": list(sorted(set(int(k) for k in top_k_list))),
         "reuse_thresholds": list(sorted(set(int(p) for p in reuse_thresholds))),
         "val_fraction": vf,

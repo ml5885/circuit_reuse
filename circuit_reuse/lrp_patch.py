@@ -5,17 +5,22 @@ https://arxiv.org/abs/2508.21258) onto our installed TransformerLens by
 class-level monkey-patching. Matches the semantics of the RelP fork
 (reference_code/RelP/TransformerLens) without forking the dependency.
 
-Rules:
-- LN-rule (Ali et al. 2022): RMSNorm / LayerNorm normalize by a detached scale,
-  so the backward pass is linear through the norm.
-- AH-rule (Ali et al. 2022): the softmaxed attention pattern is detached,
-  so gradient flows only through the OV circuit.
+Rules (all four are on by default, which is the configuration of Arora et al.
+2026, arXiv:2601.22594, and the RelP repository default plus the AH-rule):
+- LN-rule (Ali et al. 2022): RMSNorm / LayerNorm divide by a detached scale, so
+  the backward pass is linear through the norm.
+- Identity-rule (Jafari et al. 2024): the activation function sigma(u) is
+  rewritten as u * Freeze(sigma(u) / u), so its backward pass is the linear map
+  with slope sigma(u)/u (sigmoid(u) for SiLU) instead of the local derivative
+  sigma'(u). Same as Arora et al.'s RelPGradMLP coefficient.
+- AH-rule (Ali et al. 2022): the softmaxed attention pattern is detached, so
+  gradient flows only through the OV circuit.
 - Half-rule (Arras et al. 2019; Jafari et al. 2024): the gate*up elementwise
   multiply in gated MLPs passes half the gradient to each branch (Shapley).
-- Identity-rule: pass-through on the activation function itself — no code
-  change needed in TL because the Half-rule already takes care of the
-  multiplicative interaction, and act_fn's gradient is the identity component
-  of the LRP decomposition for SiLU/GELU.
+
+With all four, gradient x activation relevance is conserved through every
+linearized operation (analysis/relp_conservation_check.py). Results before
+2026-09-21 used LEGACY_LRP_RULES, which omitted the Identity-rule.
 """
 from __future__ import annotations
 
@@ -32,7 +37,20 @@ from transformer_lens.components.rms_norm import RMSNorm
 from transformer_lens.components.rms_norm_pre import RMSNormPre
 from transformer_lens.utilities.addmm import batch_addmm
 
-DEFAULT_LRP_RULES: List[str] = ["LN-rule", "AH-rule", "Half-rule"]
+DEFAULT_LRP_RULES: List[str] = ["LN-rule", "Identity-rule", "AH-rule", "Half-rule"]
+# Our rule set until 2026-09-21: no Identity-rule, so relevance was not conserved
+# through the activation function.
+LEGACY_LRP_RULES: List[str] = ["LN-rule", "AH-rule", "Half-rule"]
+PUBLISHED_LRP_RULES = {
+    "arora": DEFAULT_LRP_RULES,                        # Arora et al. 2026
+    "jafari": ["LN-rule", "Identity-rule", "Half-rule"],  # RelP repository default
+    "legacy": LEGACY_LRP_RULES,
+}
+
+
+def lrp_rules_tag(rules: Iterable[str]) -> str:
+    """Short, order-independent tag for a rule set, e.g. ``AH-Half-LN``."""
+    return "-".join(sorted(r.removesuffix("-rule") for r in rules))
 
 _PATCHED = False
 _ORIGINALS: dict = {}
@@ -234,6 +252,9 @@ def disable_lrp(model: HookedTransformer) -> None:
 
 __all__ = [
     "DEFAULT_LRP_RULES",
+    "LEGACY_LRP_RULES",
+    "PUBLISHED_LRP_RULES",
+    "lrp_rules_tag",
     "enable_lrp",
     "disable_lrp",
     "install_lrp_patches",

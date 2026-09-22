@@ -42,7 +42,8 @@ class CircuitExtractor:
     - ``relp``: Relevance Patching (Jafari et al. 2025, arXiv:2508.21258) and
       neuron-basis attribution (Arora et al. 2026, arXiv:2601.22594). Score =
       ``corrupted_grad × (clean_act − corrupted_act)`` at a single hook per component,
-      with LRP-modified backward rules (``LN-rule``, ``AH-rule``, ``Half-rule``).
+      with LRP-modified backward rules (``LN-rule``, ``Identity-rule``, ``AH-rule``,
+      ``Half-rule``, the configuration of Arora et al. 2026).
       Works at all granularities; at ``neuron`` granularity it scores MLP neurons
       only, matching Arora et al.'s neuron-basis circuits.
     """

@@ -36,6 +36,13 @@ def _excluded(model: str | None, task: str | None) -> bool:
             or str(task) in EXCLUDED_TASKS)
 
 
+def _skip_run(path: Path, variant: str | None) -> bool:
+    """RelP runs with a non-default LRP rule set (e.g. the pre-Identity-rule results)
+    live beside the main runs under a ``__lrp<tag>`` directory. By default they
+    are skipped; passing a tag selects that variant only."""
+    return f"__lrp{variant}" not in str(path) if variant else "__lrp" in str(path)
+
+
 def infer_granularity(data: dict, path: Path | str = "") -> str:
     """Extraction metrics predate the explicit field; read it off a component."""
     if data.get("granularity"):
@@ -48,9 +55,11 @@ def infer_granularity(data: dict, path: Path | str = "") -> str:
     return "neuron" if "neuron" in str(path) else "head_mlp"
 
 
-def read_cross_task(root: Path) -> pd.DataFrame:
+def read_cross_task(root: Path, variant: str | None = None) -> pd.DataFrame:
     rows = []
     for path in sorted(root.rglob("cross_task_*.json")):
+        if _skip_run(path, variant):
+            continue
         try:
             data = json.loads(path.read_text())
             tasks = [t for t in data["tasks"] if t not in EXCLUDED_TASKS]
@@ -76,9 +85,11 @@ def read_cross_task(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def read_extraction(root: Path) -> pd.DataFrame:
+def read_extraction(root: Path, variant: str | None = None) -> pd.DataFrame:
     rows = []
     for path in sorted(root.rglob("metrics.json")):
+        if _skip_run(path, variant):
+            continue
         try:
             d = json.loads(path.read_text())
             if d.get("skipped_examples", 0) or d.get("extraction_processed_examples", d.get("num_examples")) != d.get("extraction_expected_examples", d.get("num_examples")):
