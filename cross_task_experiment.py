@@ -170,7 +170,10 @@ def run_sweep(args):
         correct, total = evaluate_accuracy(model, ds, task=task)
         baseline[task] = {"correct": int(correct), "total": int(total),
                           "accuracy": correct / total if total else float("nan")}
-    means = {ab: {task: compute_corrupted_means(model, datasets[task], per_position=ab == "mean_pos")
+    # Only the kinds that this granularity ablates need a cached mean; caching the
+    # others costs several GB per task at neuron and feature granularity.
+    kinds = {"head_mlp": ("head", "mlp"), "neuron": ("neuron",), "feature": ("feature",)}[args.granularity]
+    means = {ab: {task: compute_corrupted_means(model, datasets[task], per_position=ab == "mean_pos", kinds=kinds)
                   for task in tasks}
              for ab in ablations if ab != "zero"}
 

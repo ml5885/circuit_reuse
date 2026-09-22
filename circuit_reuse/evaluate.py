@@ -9,6 +9,9 @@ from .sae import FEATURE_HOOK, attached_sae_layers
 from contextlib import nullcontext
 
 
+KIND_KEYS = {"head": "z", "mlp": "mlp_out", "neuron": "neuron_post", "feature": "sae_acts"}
+
+
 def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, callable]]:
     """Build forward hooks that zero-ablate the given components.
 
@@ -70,13 +73,16 @@ def compute_corrupted_means(
     dataset: Iterable[Example],
     layers: Optional[Iterable[int]] = None,
     per_position: bool = False,
+    kinds: Optional[Iterable[str]] = None,
 ) -> Dict[str, "torch.Tensor"]:
     """Mean activations of heads, MLP outputs and MLP neurons over the corrupted
     prompts of ``dataset`` (Wang et al. 2022, Miller et al. 2024).
 
     Keys are ``z_L{layer}`` (n_heads, d_head), ``mlp_out_L{layer}`` (d_model,),
     ``neuron_post_L{layer}`` (d_mlp,) and, for layers with an attached SAE,
-    ``sae_acts_L{layer}`` (d_sae,). With ``per_position`` every tensor gains a
+    ``sae_acts_L{layer}`` (d_sae,). ``kinds`` restricts the cache to the component
+    kinds that will be ablated, which matters at neuron and feature granularity
+    where the unused caches are the large ones. With ``per_position`` every tensor gains a
     leading position axis, holding the mean at each token position over the
     prompts that reach it; ``means["_pooled"]`` then carries the position-averaged
     means for positions beyond the longest reference prompt. A pooled mean written
@@ -84,7 +90,10 @@ def compute_corrupted_means(
     position, such as the massive-activation neurons at the first token.
     """
     layer_set = set(range(model.cfg.n_layers) if layers is None else (int(l) for l in layers))
-    hook_names = {"z": "attn.hook_z", "mlp_out": "hook_mlp_out", "neuron_post": "mlp.hook_post"}
+    wanted = None if kinds is None else {KIND_KEYS[k] for k in kinds}
+    hook_names = {key: name for key, name in
+                  (("z", "attn.hook_z"), ("mlp_out", "hook_mlp_out"), ("neuron_post", "mlp.hook_post"))
+                  if wanted is None or key in wanted}
     sums: Dict[str, torch.Tensor] = {}
     counts: Dict[str, torch.Tensor] = {}
 
@@ -106,8 +115,9 @@ def compute_corrupted_means(
 
     hooks = [(f"blocks.{layer}.{name}", make_hook(f"{key}_L{layer}"))
              for layer in layer_set for key, name in hook_names.items()]
-    hooks += [(FEATURE_HOOK.format(layer=layer), make_hook(f"sae_acts_L{layer}"))
-              for layer in attached_sae_layers(model) if layer in layer_set]
+    if wanted is None or "sae_acts" in wanted:
+        hooks += [(FEATURE_HOOK.format(layer=layer), make_hook(f"sae_acts_L{layer}"))
+                  for layer in attached_sae_layers(model) if layer in layer_set]
     model.eval()
     with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
         for ex in dataset:
