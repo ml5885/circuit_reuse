@@ -11,12 +11,13 @@ from contextlib import nullcontext
 from .graph import Graph, Granularity, attribute_single_example, attribute_single_example_ig
 from .dataset import Example
 from .lrp_patch import DEFAULT_LRP_RULES, enable_lrp, disable_lrp
+from .sae import feature_hook_names
 
 
 @dataclass(frozen=True)
 class Component:
     layer: int
-    kind: str  # "head", "mlp", or "neuron"
+    kind: str  # "head", "mlp", "neuron" or "feature" (SAE latent, see sae.py)
     index: int
 
     def __hash__(self) -> int:
@@ -45,6 +46,11 @@ class CircuitExtractor:
       with LRP-modified backward rules (``LN-rule``, ``AH-rule``, ``Half-rule``).
       Works at all granularities; at ``neuron`` granularity it scores MLP neurons
       only, matching Arora et al.'s neuron-basis circuits.
+
+    Granularity ``feature`` scores the latents of SAEs attached with
+    ``sae.attach_saes`` (Marks et al. 2025), with ``eap_ig`` or ``relp``. Only
+    features whose activation differs between the clean and corrupted input
+    receive a score, so the per-example score dicts are sparse and of varying size.
     """
 
     def __init__(
@@ -70,9 +76,9 @@ class CircuitExtractor:
             raise ValueError(f"Unknown task_metric: {self.task_metric}")
 
         if method in ("eap", "eap_ig"):
-            if granularity == "neuron" and method != "eap_ig":
+            if granularity != "head_mlp" and method != "eap_ig":
                 raise ValueError(
-                    "granularity='neuron' is supported with method='eap_ig' or "
+                    f"granularity='{granularity}' is supported with method='eap_ig' or "
                     "method='relp'."
                 )
             self.graph = (
@@ -194,7 +200,13 @@ class CircuitExtractor:
         d_mlp = self.model.cfg.d_mlp
 
         targets: List[HookTarget] = []
-        if self.granularity == "neuron":
+        if self.granularity == "feature":
+            hooks = feature_hook_names(self.model)
+            if not hooks:
+                raise RuntimeError("granularity='feature' needs SAEs attached with sae.attach_saes")
+            for layer, name in hooks.items():
+                targets.append((name, _make_feature_scorer(layer)))
+        elif self.granularity == "neuron":
             # Arora et al.: MLP neurons only, scored at hook_post
             for layer in range(n_layers):
                 name = f"blocks.{layer}.mlp.hook_post"
@@ -291,7 +303,7 @@ class CircuitExtractor:
 
         if self.method == "relp":
             return self._extract_relp(examples, task_name, device, autocast_ctx)
-        if self.method == "eap_ig" and self.granularity == "neuron":
+        if self.method == "eap_ig" and self.granularity in ("neuron", "feature"):
             return self._extract_eap_ig_neurons(examples, task_name, autocast_ctx)
         return self._extract_edge_graph(examples, task_name, device, autocast_ctx)
 
@@ -382,7 +394,7 @@ class CircuitExtractor:
             circuits.append(set(scores))
             if (idx + 1) % 10 == 0 or (idx + 1) == len(examples):
                 print(
-                    f"[{task_name}] (eap_ig/neuron) "
+                    f"[{task_name}] (eap_ig/{self.granularity}) "
                     f"{idx + 1}/{len(examples)} examples processed"
                 )
             torch.cuda.empty_cache()
@@ -534,6 +546,16 @@ def _make_neuron_scorer(layer: int, d_mlp: int):
         for i in range(d_mlp):
             out[Component(layer=layer, kind="neuron", index=i)] = float(vals[i])
         return out
+    return scorer
+
+
+def _make_feature_scorer(layer: int):
+    def scorer(attr: torch.Tensor) -> Dict[Component, float]:
+        # attr: [batch, pos, d_sae]; features inactive on both inputs have attr == 0 and are dropped
+        per_feature = attr.sum(dim=(0, 1))
+        idx = per_feature.nonzero().flatten()
+        return {Component(layer=layer, kind="feature", index=i): v
+                for i, v in zip(idx.tolist(), per_feature[idx].tolist())}
     return scorer
 
 

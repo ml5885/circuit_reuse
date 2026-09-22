@@ -32,6 +32,7 @@ from circuit_reuse.evaluate import (
     evaluate_accuracy_with_mean_ablation,
 )
 from circuit_reuse.circuit_extraction import Component
+from circuit_reuse.sae import add_sae_args, spec_from_args, attach_saes
 
 
 def parse_component_str(s: str) -> Component:
@@ -157,6 +158,9 @@ def run_sweep(args):
     torch.manual_seed(args.seed)
     model = load_model_any(args.model_name, device=args.device, revision=args.hf_revision)
     model.eval()
+    sae_spec = spec_from_args(args) if args.granularity == "feature" else None
+    if sae_spec:
+        attach_saes(model, sae_spec)
     datasets, baseline = {}, {}
     for task in tasks:
         digits = args.digits if args.digits is not None and task == "addition" else 2
@@ -237,6 +241,7 @@ def run_sweep(args):
             "schema_version": 2, "model_name": args.model_name,
             "hf_revision": args.hf_revision, "method": args.method,
             "granularity": args.granularity, "ablation": ablation,
+            "sae": sae_spec.slug if sae_spec else None,
             "K": K, "threshold": threshold, "num_examples": args.num_examples, "seed": args.seed, "tasks": tasks,
             "baseline": baseline, "circuit_sizes": {
                 donor: len(component_cache[(donor, K, threshold)])
@@ -265,7 +270,8 @@ def main():
     parser.add_argument("--K", default="10", help="integer or comma-separated list")
     parser.add_argument("--threshold", default="100", help="integer or comma-separated list")
     parser.add_argument("--method", default="eap")
-    parser.add_argument("--granularity", default="head_mlp")
+    parser.add_argument("--granularity", default="head_mlp", choices=["head_mlp", "neuron", "feature"])
+    add_sae_args(parser)
     parser.add_argument("--ablation", default="zero",
                         help="comma-separated subset of zero, mean, mean_pos; all are evaluated "
                              "in one process on the same examples")

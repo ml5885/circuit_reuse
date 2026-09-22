@@ -5,6 +5,7 @@ from typing import Iterable, List, Tuple, Any, Dict, Optional
 import torch
 from .dataset import Example
 from .circuit_extraction import Component
+from .sae import FEATURE_HOOK, attached_sae_layers
 from contextlib import nullcontext
 
 
@@ -16,6 +17,7 @@ def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, calla
     """
     heads_by_layer: Dict[int, List[int]] = defaultdict(list)
     neurons_by_layer: Dict[int, List[int]] = defaultdict(list)
+    features_by_layer: Dict[int, List[int]] = defaultdict(list)
     mlp_layers: set = set()
 
     for comp in removed:
@@ -25,6 +27,8 @@ def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, calla
             mlp_layers.add(comp.layer)
         elif comp.kind == "neuron":
             neurons_by_layer[comp.layer].append(comp.index)
+        elif comp.kind == "feature":
+            features_by_layer[comp.layer].append(comp.index)
 
     hooks: List[Tuple[str, callable]] = []
 
@@ -51,6 +55,13 @@ def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, calla
             return act
         hooks.append((f"blocks.{layer}.mlp.hook_post", hook_neurons))
 
+    for layer, indices in features_by_layer.items():
+        idx = torch.tensor(indices)
+        def hook_features(act, hook=None, idx=idx):
+            act[:, :, idx] = 0.0
+            return act
+        hooks.append((FEATURE_HOOK.format(layer=layer), hook_features))
+
     return hooks
 
 
@@ -63,8 +74,9 @@ def compute_corrupted_means(
     """Mean activations of heads, MLP outputs and MLP neurons over the corrupted
     prompts of ``dataset`` (Wang et al. 2022, Miller et al. 2024).
 
-    Keys are ``z_L{layer}`` (n_heads, d_head), ``mlp_out_L{layer}`` (d_model,) and
-    ``neuron_post_L{layer}`` (d_mlp,). With ``per_position`` every tensor gains a
+    Keys are ``z_L{layer}`` (n_heads, d_head), ``mlp_out_L{layer}`` (d_model,),
+    ``neuron_post_L{layer}`` (d_mlp,) and, for layers with an attached SAE,
+    ``sae_acts_L{layer}`` (d_sae,). With ``per_position`` every tensor gains a
     leading position axis, holding the mean at each token position over the
     prompts that reach it; ``means["_pooled"]`` then carries the position-averaged
     means for positions beyond the longest reference prompt. A pooled mean written
@@ -94,6 +106,8 @@ def compute_corrupted_means(
 
     hooks = [(f"blocks.{layer}.{name}", make_hook(f"{key}_L{layer}"))
              for layer in layer_set for key, name in hook_names.items()]
+    hooks += [(FEATURE_HOOK.format(layer=layer), make_hook(f"sae_acts_L{layer}"))
+              for layer in attached_sae_layers(model) if layer in layer_set]
     model.eval()
     with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
         for ex in dataset:
@@ -134,6 +148,7 @@ def _build_mean_ablation_hooks(
     heads_by_layer: Dict[int, List[int]] = defaultdict(list)
     mlp_layers: set = set()
     neurons_by_layer: Dict[int, List[int]] = defaultdict(list)
+    features_by_layer: Dict[int, List[int]] = defaultdict(list)
     for comp in removed:
         if comp.kind == "head":
             heads_by_layer[comp.layer].append(comp.index)
@@ -141,6 +156,8 @@ def _build_mean_ablation_hooks(
             mlp_layers.add(comp.layer)
         elif comp.kind == "neuron":
             neurons_by_layer[comp.layer].append(comp.index)
+        elif comp.kind == "feature":
+            features_by_layer[comp.layer].append(comp.index)
 
     hooks: List[Tuple[str, callable]] = []
 
@@ -165,6 +182,14 @@ def _build_mean_ablation_hooks(
             act[:, :, idx.to(act.device)] = mean[:, idx.to(mean.device)][None]
             return act
         hooks.append((f"blocks.{layer}.mlp.hook_post", hook_neurons))
+
+    for layer, indices in features_by_layer.items():
+        idx = torch.tensor(indices)
+        def hook_features(act, hook=None, idx=idx, key=f"sae_acts_L{layer}"):
+            mean = _select_mean(means, key, act.shape[1]).to(device=act.device, dtype=act.dtype)
+            act[:, :, idx.to(act.device)] = mean[:, idx.to(mean.device)][None]
+            return act
+        hooks.append((FEATURE_HOOK.format(layer=layer), hook_features))
 
     return hooks
 

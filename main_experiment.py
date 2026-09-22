@@ -21,6 +21,7 @@ from circuit_reuse.evaluate import (
     evaluate_accuracy,
     evaluate_predictions,
 )
+from circuit_reuse.sae import add_sae_args, spec_from_args, attach_saes, reconstruction_report
 
 
 def _default_run_name():
@@ -183,9 +184,11 @@ def parse_args() -> argparse.Namespace:
         "--granularity",
         type=str,
         default="head_mlp",
-        choices=["head_mlp", "neuron"],
-        help="Node granularity for circuit extraction (default: head_mlp).",
+        choices=["head_mlp", "neuron", "feature"],
+        help="Node granularity for circuit extraction (default: head_mlp). "
+             "'feature' scores the latents of SAEs attached per --sae-* (Gemma Scope).",
     )
+    add_sae_args(parser)
     parser.add_argument(
         "--max-prompt-chars",
         type=int,
@@ -208,7 +211,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _enumerate_all_components(model, granularity="head_mlp", method="eap"):
+def _enumerate_all_components(model, granularity="head_mlp", method="eap", example_scores=None):
+    """The pool the control circuit is sampled from. At feature granularity it is
+    the features attributed on at least one training example, since a random draw
+    from all SAE latents would be inactive on the task and ablate nothing."""
+    if granularity == "feature":
+        return sorted({c for sc in example_scores for c in sc}, key=lambda c: (c.layer, c.index))
     n_layers = model.cfg.n_layers
     n_heads = model.cfg.n_heads
     comps = []
@@ -251,13 +259,15 @@ def _permutation_test(shared_flags: List[int], control_flags: List[int], rng: ra
 
 
 def _build_topk_example_sets(per_example_scores: List[Dict[Component, float]], k: int) -> List[set]:
-    """Build sets of the top-k% components for each example."""
-    total_components = len(per_example_scores[0])
-    take_components = max(1, int(total_components * k / 100))
+    """Build sets of the top-k% components for each example. Every component is
+    scored at head_mlp and neuron granularity, so k% is of all components; at
+    feature granularity only features active on the example are scored, so k% is
+    of those and the sets vary in size."""
     sets = []
     for sc in per_example_scores:
+        take = max(1, int(len(sc) * k / 100))
         ranked = sorted(sc.items(), key=lambda x: x[1], reverse=True)
-        sets.append({c for c, _ in ranked[:take_components]})
+        sets.append({c for c, _ in ranked[:take]})
     return sets
 
 
@@ -446,6 +456,8 @@ def _run_single_combination(
     # under the same method (e.g. relp head_mlp vs relp neuron) don't clobber.
     # Omit it for head_mlp to stay backward-compatible with pre-RelP caches.
     gran_suffix = "" if granularity == "head_mlp" else f"__g{granularity}"
+    if granularity == "feature":
+        gran_suffix += f"-{model.sae_spec.slug}"
     method_suffix = f"{method}__ig{ig_steps}" if method == "eap_ig" else method
     metric_suffix = "" if task_metric == "logprob" else f"__tm{task_metric}"
     attrib_name = (
@@ -567,11 +579,16 @@ def _run_single_combination(
         "baseline_val_total": baseline_val_total,
         "extraction_expected_examples": len(train_examples),
         "extraction_processed_examples": len(example_scores),
+        "scored_components_per_example": sum(len(sc) for sc in example_scores) / max(1, len(example_scores)),
         "skipped_examples": int(getattr(locals().get("extractor", None), "last_skipped_examples", 0)),
         "by_k": {},
     }
 
-    all_components = _enumerate_all_components(model, granularity=granularity, method=method)
+    all_components = _enumerate_all_components(model, granularity=granularity, method=method, example_scores=example_scores)
+    if granularity == "feature":
+        metrics["sae"] = {"release": model.sae_spec.release, "width": model.sae_spec.width, "l0": model.sae_spec.l0,
+                          "paths": {str(layer): model.blocks[layer].sae.path for layer in sorted(model.sae_spec.layers or range(model.cfg.n_layers))},
+                          "control_pool_size": len(all_components)}
 
     # Score threshold mode: use absolute score threshold instead of top-K
     if score_threshold is not None:
@@ -784,8 +801,7 @@ def _run_single_combination(
         if K <= 0:
             continue
         sets_k = _build_topk_example_sets(example_scores, K)
-        total_components = len(example_scores[0])
-        take_components = max(1, int(total_components * K / 100))
+        take_components = sum(len(s) for s in sets_k) / max(1, len(sets_k))
         counts = _count_components(sets_k)
         n_ex = len(sets_k)
 
@@ -867,6 +883,7 @@ def _run_single_combination(
             thresh_entry = {
                 "threshold": thr,
                 "shared_circuit_size": shared_size,
+                "avg_circuit_size": take_components,
                 "reuse_percent": reuse_percent,
                 "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
                 "rng_seed": rng_seed,
@@ -965,11 +982,15 @@ def main():
             method = args.method
             granularity = args.granularity
 
-        if granularity == "neuron" and method not in ("relp", "eap_ig"):
+        if granularity != "head_mlp" and method not in ("relp", "eap_ig"):
             raise SystemExit(
-                "--granularity neuron requires --method relp or eap_ig "
+                f"--granularity {granularity} requires --method relp or eap_ig "
                 f"(got --method {method})"
             )
+        if granularity == "feature":
+            attach_saes(model, spec_from_args(args))
+            for layer, r in reconstruction_report(model, ["The quick brown fox jumps over the lazy dog."]).items():
+                print(f"[SAE] layer {layer:2d}  FVU {r['fvu']:.3f}  L0 {r['l0']:6.1f}  {r['path']}")
 
         lrp_rules = [r.strip() for r in args.lrp_rules.split(",") if r.strip()]
 
