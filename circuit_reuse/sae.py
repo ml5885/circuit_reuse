@@ -42,10 +42,12 @@ class SAESpec:
     width: str = "16k"
     l0: int = 100
     layers: Optional[tuple[int, ...]] = None
+    dtype: str = "float32"
 
     @property
     def slug(self) -> str:
-        return f"{self.release.split('/')[-1]}-{self.width}-l0{self.l0}"
+        suffix = "" if self.dtype == "float32" else f"-{self.dtype}"
+        return f"{self.release.split('/')[-1]}-{self.width}-l0{self.l0}{suffix}"
 
 
 class JumpReLUSAE(nn.Module):
@@ -104,7 +106,7 @@ def attach_saes(model, spec: SAESpec, saes: Optional[Dict[int, JumpReLUSAE]] = N
     """Splice one SAE per layer into ``blocks.{L}.hook_resid_post`` as a permanent
     hook, and register the feature hook points with the model."""
     if saes is None:
-        saes = load_saes(spec, model.cfg.n_layers, model.cfg.device)
+        saes = load_saes(spec, model.cfg.n_layers, model.cfg.device, getattr(torch, spec.dtype))
     for layer, sae in saes.items():
         block = model.blocks[layer]
         block.add_module("sae", sae)
@@ -127,11 +129,14 @@ def add_sae_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sae-width", default=SAESpec.width)
     parser.add_argument("--sae-l0", type=int, default=SAESpec.l0, help="per layer, use the SAE whose average L0 is closest to this")
     parser.add_argument("--sae-layers", default=None, help="comma-separated layers (default: all)")
+    parser.add_argument("--sae-dtype", default=SAESpec.dtype, choices=["float32", "bfloat16"],
+                        help="width 65k needs bfloat16 to fit on a 32 GB card (29 GiB against 15 GiB)")
 
 
 def spec_from_args(args) -> SAESpec:
     layers = tuple(int(x) for x in args.sae_layers.split(",")) if args.sae_layers else None
-    return SAESpec(release=args.sae_release, width=args.sae_width, l0=args.sae_l0, layers=layers)
+    return SAESpec(release=args.sae_release, width=args.sae_width, l0=args.sae_l0, layers=layers,
+                   dtype=getattr(args, "sae_dtype", SAESpec.dtype))
 
 
 @torch.inference_mode()
