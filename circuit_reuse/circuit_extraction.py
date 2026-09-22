@@ -249,9 +249,11 @@ class CircuitExtractor:
                 store[name] = grad.detach()
             return bwd_hook
 
-        # Clean forward — cache activations (no grad).
+        # Clean forward — cache activations (no grad). Runs under the same autocast
+        # context as the corrupted forward below: mixing precisions across the two
+        # makes clean_act - corrupted_act numerical noise wherever it should be zero.
         clean_cache: Dict[str, torch.Tensor] = {}
-        with torch.inference_mode():
+        with torch.inference_mode(), autocast_ctx:
             fwd = [(n, _make_fwd_cache_hook(clean_cache, n)) for n in hook_names]
             with self.model.hooks(fwd_hooks=fwd):
                 clean_logits = self.model(clean_tokens, attention_mask=clean_attention_mask)
