@@ -89,12 +89,13 @@ def error_hooks(means: dict[int, torch.Tensor]):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--num-examples", type=int, default=100, help="evaluation examples per task")
     parser.add_argument("--model", default="google/gemma-2-2b")
     parser.add_argument("--n-attr", type=int, default=200)
     args = parser.parse_args()
     model = load_model(args.model)
     attach_saes(model, SAESpec())
-    datasets = eval_datasets(args.model)
+    datasets = eval_datasets(args.model, num_examples=args.num_examples)
     path = OUT / "sae_error" / f"{args.model.replace('/', '_')}.json"
     results = {}
     for task in TASKS:

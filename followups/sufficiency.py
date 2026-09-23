@@ -39,13 +39,14 @@ def faithfulness(kept: float, full: float, none: float) -> float:
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--num-examples", type=int, default=100, help="evaluation examples per task")
     parser.add_argument("--model", default="meta-llama/Llama-3.2-3B")
     parser.add_argument("--granularities", default="head_mlp,neuron")
     parser.add_argument("--method", default="eap_ig")
     parser.add_argument("--n-random", type=int, default=3)
     args = parser.parse_args()
     model = load_model(args.model)
-    datasets = eval_datasets(args.model)
+    datasets = eval_datasets(args.model, num_examples=args.num_examples)
     rng = random.Random(0)
     for gran in args.granularities.split(","):
         path = OUT / "sufficiency" / f"{args.model.replace('/', '_')}__{args.method}_{gran}.json"
