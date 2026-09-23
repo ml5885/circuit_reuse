@@ -32,6 +32,7 @@ from huggingface_hub import hf_hub_download, list_repo_files
 from transformer_lens.hook_points import HookPoint
 
 FEATURE_HOOK = "blocks.{layer}.sae.hook_sae_acts_post"
+ERROR_HOOK = "blocks.{layer}.sae.hook_sae_error"
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class JumpReLUSAE(nn.Module):
         self.threshold = nn.Parameter(threshold, requires_grad=False)
         self.path = path
         self.hook_sae_acts_post = HookPoint()
+        self.hook_sae_error = HookPoint()
 
     @property
     def d_sae(self) -> int:
@@ -75,7 +77,7 @@ class JumpReLUSAE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x32 = x.to(self.W_enc.dtype)
         acts = self.encode(x32.detach())
-        err = x32 - self.decode(acts).detach()
+        err = self.hook_sae_error(x32 - self.decode(acts).detach())
         if torch.is_grad_enabled():
             acts.requires_grad_(True)
         acts = self.hook_sae_acts_post(acts)

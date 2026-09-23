@@ -516,3 +516,68 @@ __all__ = [
     "evaluate_predictions",
     "compute_corrupted_means",
 ]
+
+
+def _label_token_ids(model, label: str) -> List[int]:
+    """First-token ids of the variants _score_first_token considers for ``label``."""
+    ids = set()
+    for v in (label, f" {label}", f"\n{label}", f": {label}", f":\n{label}"):
+        toks = model.to_tokens(v, prepend_bos=False)[0].tolist()
+        if toks:
+            ids.add(int(toks[0]))
+    return sorted(ids)
+
+
+def evaluate_graded(model: Any, dataset: Iterable[Example], task: str,
+                    hooks: List[Tuple[str, callable]] = ()) -> List[Dict[str, float]]:
+    """Per-example correctness, under the same rule as evaluate_accuracy, together
+    with a graded measure that does not saturate at chance: the log-probability of
+    the gold answer (summed over its tokens for addition, over the first-token
+    variants of the gold label otherwise). For IOI also the logit difference
+    between the indirect object and the subject, and the indirect object's rank in
+    the full vocabulary."""
+    model.eval()
+    device = model.cfg.device
+    out: List[Dict[str, float]] = []
+    with torch.inference_mode(), model.hooks(fwd_hooks=list(hooks)):
+        for ex in dataset:
+            tokens = model.to_tokens(ex.prompt, prepend_bos=True).to(device)
+            logits_last = model(tokens)[0, -1].float()
+            logp = torch.log_softmax(logits_last, dim=-1)
+            row: Dict[str, float] = {}
+            if task == "boolean":
+                true_ids, false_ids = _boolean_token_id_groups(model)
+                gold = sorted(true_ids if ex.target == "true" else false_ids)
+                row["correct"] = float(_classify_boolean(logits_last, model)[0] == ex.target)
+                row["logprob"] = float(torch.logsumexp(logp[gold], 0))
+            elif task == "ioi":
+                labels = ex.labels or [ex.target, ex.corrupted_target]
+                gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
+                row["correct"] = float(_classify_ioi(logits_last, model, labels) == gold_idx)
+                io, s = labels[gold_idx], labels[1 - gold_idx]
+                io_ids = _label_token_ids(model, io)
+                row["logprob"] = float(torch.logsumexp(logp[io_ids], 0))
+                row["logit_diff"] = _score_first_token(logits_last, model, io) - _score_first_token(logits_last, model, s)
+                best = max(io_ids, key=lambda i: float(logits_last[i]))
+                row["io_rank"] = float((logits_last > logits_last[best]).sum())
+            elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
+                labels = ex.labels or ["A", "B", "C", "D"]
+                row["correct"] = float(_classify_from_labels(logits_last, model, labels) == ex.target)
+                row["logprob"] = float(torch.logsumexp(logp[_label_token_ids(model, ex.target)], 0))
+            else:
+                gold_ids = _extract_gold_ids(model, ex.prompt, ex.target, device)
+                row["correct"] = float(_check_addition_correct(model, ex.prompt, ex.target, device, logits_last))
+                forced = torch.cat([tokens, torch.tensor([gold_ids[:-1]], device=device, dtype=tokens.dtype)], dim=1)
+                step_logp = torch.log_softmax(model(forced)[0, tokens.shape[1] - 1:].float(), dim=-1)
+                row["logprob"] = float(step_logp[torch.arange(len(gold_ids), device=device), torch.tensor(gold_ids, device=device)].sum())
+            out.append(row)
+    return out
+
+
+def summarize_graded(rows: List[Dict[str, float]]) -> Dict[str, float]:
+    """Means of every per-example field, plus the median IOI rank."""
+    summary = {k: float(sum(r[k] for r in rows) / len(rows)) for k in rows[0]} if rows else {}
+    if rows and "io_rank" in rows[0]:
+        ranks = sorted(r["io_rank"] for r in rows)
+        summary["io_rank_median"] = ranks[len(ranks) // 2]
+    return summary

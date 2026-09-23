@@ -26,10 +26,14 @@ import torch
 from models.olmo_adapter import load_model_any
 from circuit_reuse.dataset import get_dataset, apply_few_shot_prefix
 from circuit_reuse.evaluate import (
+    _build_ablation_hooks,
+    _build_mean_ablation_hooks,
     compute_corrupted_means,
     evaluate_accuracy,
     evaluate_accuracy_with_ablation,
     evaluate_accuracy_with_mean_ablation,
+    evaluate_graded,
+    summarize_graded,
 )
 from circuit_reuse.circuit_extraction import Component
 from circuit_reuse.sae import add_sae_args, spec_from_args, attach_saes
@@ -119,7 +123,7 @@ def load_shared_components(metrics_path: Path, K: int, threshold: int,
 
 def output_path(output_dir: Path, model_name: str, method: str, granularity: str,
                 K: int, threshold: int, score_threshold=None, score_filter=None,
-                ablation: str = "zero") -> Path:
+                ablation: str = "zero", graded: bool = False) -> Path:
     model_slug = model_name.replace("/", "_")
     if score_filter is not None:
         stem = f"cross_task_{model_slug}_{method}_{granularity}_sf{score_filter}_p{threshold}"
@@ -128,6 +132,7 @@ def output_path(output_dir: Path, model_name: str, method: str, granularity: str
     else:
         stem = f"cross_task_{model_slug}_{method}_{granularity}_K{K}_p{threshold}"
     stem += {"zero": "", "mean": "_meanabl", "mean_pos": "_meanabl_pos"}[ablation]
+    stem += "_graded" if graded else ""
     return output_dir / f"{stem}.json"
 
 
@@ -167,9 +172,15 @@ def run_sweep(args):
         ds = apply_few_shot_prefix(list(get_dataset(task, num_examples=args.num_examples,
                                                      digits=digits)), task, args.model_name)
         datasets[task] = ds
-        correct, total = evaluate_accuracy(model, ds, task=task)
+        if args.graded:
+            graded_base = summarize_graded(evaluate_graded(model, ds, task))
+            correct, total = round(graded_base["correct"] * len(ds)), len(ds)
+        else:
+            correct, total = evaluate_accuracy(model, ds, task=task)
         baseline[task] = {"correct": int(correct), "total": int(total),
                           "accuracy": correct / total if total else float("nan")}
+        if args.graded:
+            baseline[task]["graded"] = graded_base
     # Only the kinds that this granularity ablates need a cached mean; caching the
     # others costs several GB per task at neuron and feature granularity.
     kinds = {"head_mlp": ("head", "mlp"), "neuron": ("neuron",), "feature": ("feature",)}[args.granularity]
@@ -183,7 +194,7 @@ def run_sweep(args):
     for K, threshold, ablation in ((K, t, ab) for K in Ks for t in thresholds for ab in ablations):
         path = output_path(out_dir, args.model_name, args.method, args.granularity,
                            K, threshold, args.score_threshold, args.score_filter,
-                           ablation) if out_dir else None
+                           ablation, args.graded) if out_dir else None
         existing = None
         if path and valid_output(path, tasks):
             if not refresh:
@@ -220,8 +231,15 @@ def run_sweep(args):
                     cells[donor][target] = existing["cells"][donor][target]
                     continue
                 base = baseline[target]
+                graded = None
                 if not removed:  # empty circuit: ablating nothing is the baseline
                     correct, total = base["correct"], base["total"]
+                    graded = base.get("graded")
+                elif args.graded:
+                    hooks = (_build_ablation_hooks(removed) if ablation == "zero"
+                             else _build_mean_ablation_hooks(removed, means[ablation][target]))
+                    graded = summarize_graded(evaluate_graded(model, datasets[target], target, hooks))
+                    correct, total = round(graded["correct"] * len(datasets[target])), len(datasets[target])
                 elif ablation == "zero":
                     correct, total = evaluate_accuracy_with_ablation(
                         model, datasets[target], task=target, removed=removed)
@@ -240,6 +258,9 @@ def run_sweep(args):
                                           if base["accuracy"] else float("nan")),
                     "evaluated_samples": int(total),
                 }
+                if graded is not None:
+                    cells[donor][target]["graded"] = graded
+                    cells[donor][target]["logprob_drop"] = base["graded"]["logprob"] - graded["logprob"]
         result = {
             "schema_version": 2, "model_name": args.model_name,
             "hf_revision": args.hf_revision, "method": args.method,
@@ -278,6 +299,9 @@ def main():
     parser.add_argument("--ablation", default="zero",
                         help="comma-separated subset of zero, mean, mean_pos; all are evaluated "
                              "in one process on the same examples")
+    parser.add_argument("--graded", action="store_true",
+                        help="Also record the log-probability of the gold answer (and, for IOI, the "
+                             "logit difference and rank) for every cell; outputs get a _graded suffix.")
     parser.add_argument("--score-threshold", type=float, default=None)
     parser.add_argument("--score-filter", type=float, default=None, dest="score_filter")
     parser.add_argument("--num-examples", type=int, default=100)
