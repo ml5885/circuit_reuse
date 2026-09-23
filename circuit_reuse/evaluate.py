@@ -353,9 +353,11 @@ def _classify_boolean(logits_last: Any, model, verbose: bool = False) -> Tuple[s
 
 
 def _score_first_token(logits_last, model, label: str) -> float:
-    """Score a label by the best logit among plausible first-token variants."""
+    """Score a label by the best logit over its first token with and without a leading space.
+    Spellings with a leading newline or colon are not used: their first token is the newline
+    or colon, which is shared by every label and makes them tie."""
     ids = set()
-    for v in (label, f" {label}", f"\n{label}", f": {label}", f":\n{label}"):
+    for v in (label, f" {label}"):
         toks = model.to_tokens(v, prepend_bos=False)
         t_ids = toks[0].tolist()
         if len(t_ids) >= 1:
@@ -521,7 +523,7 @@ __all__ = [
 def _label_token_ids(model, label: str) -> List[int]:
     """First-token ids of the variants _score_first_token considers for ``label``."""
     ids = set()
-    for v in (label, f" {label}", f"\n{label}", f": {label}", f":\n{label}"):
+    for v in (label, f" {label}"):
         toks = model.to_tokens(v, prepend_bos=False)[0].tolist()
         if toks:
             ids.add(int(toks[0]))
