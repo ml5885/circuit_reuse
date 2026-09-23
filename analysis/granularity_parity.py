@@ -51,8 +51,9 @@ def infer_granularity(data: dict, path: Path | str = "") -> str:
         for cell in entry.get("thresholds", {}).values():
             components = cell.get("shared_components") or []
             if components:
-                return "neuron" if str(components[0]).startswith("neuron[") else "head_mlp"
-    return "neuron" if "neuron" in str(path) else "head_mlp"
+                first = str(components[0])
+                return next((g for g in ("neuron", "feature") if first.startswith(g + "[")), "head_mlp")
+    return next((g for g in ("neuron", "feature") if g in str(path)), "head_mlp")
 
 
 def read_cross_task(root: Path, variant: str | None = None) -> pd.DataFrame:
@@ -238,8 +239,8 @@ def summarize(extraction: pd.DataFrame, cross: pd.DataFrame) -> tuple[pd.DataFra
 # light within one hue, so every figure reads granularity-first. Gold is the
 # secondary and names a third category where one exists, never a granularity.
 METHOD_NAMES = {"eap_ig": "EAP-IG", "relp": "RelP", "eap": "EAP"}
-GRAN_NAMES = {"head_mlp": "attention heads and MLP blocks", "neuron": "MLP neurons"}
-GRAN_SHORT = {"head_mlp": "component-level", "neuron": "neuron-level"}
+GRAN_NAMES = {"head_mlp": "attention heads and MLP blocks", "neuron": "MLP neurons", "feature": "SAE features"}
+GRAN_SHORT = {"head_mlp": "component-level", "neuron": "neuron-level", "feature": "feature-level"}
 TASK_NAMES = {"addition": "Addition", "arc_challenge": "ARC (Chal.)",
               "arc_easy": "ARC (Easy)", "boolean": "Boolean", "ioi": "IOI",
               "mcqa": "CopyColors MCQA"}
@@ -250,12 +251,14 @@ MODEL_NAMES = {"google/gemma-2-2b": "Gemma 2 2B",
                "qwen3-4b": "Qwen3 4B", "qwen3-8b": "Qwen3 8B",
                "allenai/OLMo-2-0425-1B": "OLMo 2 1B"}
 CONFIG_ORDER = [("eap_ig", "head_mlp"), ("relp", "head_mlp"),
-                ("eap_ig", "neuron"), ("relp", "neuron")]
+                ("eap_ig", "neuron"), ("relp", "neuron"),
+                ("eap_ig", "feature"), ("relp", "feature")]
 # Sampled from Diebenkorn, Ocean Park #116: the dusty blue field against the
 # ochre band, each with a lighter tone of itself for the second attribution
 # method, and the mint band as the secondary.
-GRAN_COLORS = {"head_mlp": "#5FA8D0", "neuron": "#E8B33C"}
-GRAN_COLORS_LIGHT = {"head_mlp": "#AFD4E9", "neuron": "#F6DDA0"}
+# The mint band is the third granularity, SAE features, when a run includes it.
+GRAN_COLORS = {"head_mlp": "#5FA8D0", "neuron": "#E8B33C", "feature": "#66C79C"}
+GRAN_COLORS_LIGHT = {"head_mlp": "#AFD4E9", "neuron": "#F6DDA0", "feature": "#B3E3CD"}
 # Distinct hues for the five models, used wherever a figure is per-model.
 MODEL_COLORS = ["#5FA8D0", "#E8B33C", "#66C79C", "#DD7F72", "#8E7CD0"]
 METHOD_LINESTYLE = {"eap_ig": "-", "relp": (0, (4, 1.6))}

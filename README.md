@@ -8,7 +8,7 @@ For each example in a task dataset, we extract a circuit, defined as the top-K% 
 
 **Specificity** is a measure of how much the circuit belongs to its task rather than to the model in general. We ablate task A's shared circuit and measure the accuracy drop on task A, then ablate every other task's shared circuit and measure the drop on task A again. A specific circuit hurts its own task more than the others' circuits do.
 
-We run this at two granularities, attention heads and MLP blocks (`head_mlp`) or individual MLP neurons (`neuron`), with three attribution methods (EAP, EAP-IG, RelP), on six tasks and five models: Gemma 2 2B and its instruction-tuned variant, Llama 3.2 3B and its Instruct variant, and Qwen3 4B.
+We run this at two granularities, attention heads and MLP blocks (`head_mlp`) or individual MLP neurons (`neuron`), with three attribution methods (EAP, EAP-IG, RelP), on six tasks and five models: Gemma 2 2B and its instruction-tuned variant, Llama 3.2 3B and its Instruct variant, and Qwen3 4B. A third granularity, `feature`, uses the latents of pretrained sparse autoencoders (Gemma Scope) and is available for Gemma 2 2B; see [SAE features](#sae-features).
 
 ## Setup
 
@@ -86,6 +86,31 @@ python cross_task_experiment.py \
 
 The model is loaded once and every (K, P) matrix is evaluated. Each `cross_task_<model>_<method>_<granularity>_K<K>_p<P>.json` file holds `cells[donor][target]` with the baseline and ablated accuracies and the drop in percentage points, plus the baselines and circuit sizes. Matrices that already exist are skipped, so the command can be rerun after an interruption. `--refresh-tasks t1,t2` recomputes only the cells where the donor or the target is in the list and copies the other cells from the existing file.
 
+### SAE features
+
+`--granularity feature` splices a JumpReLU SAE into the residual stream after every layer (`circuit_reuse/sae.py`). The block output becomes `decode(acts) + (x - decode(acts))`, which equals `x` on the unablated pass, so baseline accuracies are unchanged. The feature activations are a hook point, `blocks.{L}.sae.hook_sae_acts_post`, that EAP-IG and RelP score and that zero and mean ablation write to. The error term is held at its clean value, so ablating a feature removes only that feature's contribution (Marks et al. 2025).
+
+```bash
+python -m circuit_reuse.sae --model google/gemma-2-2b          # reconstruction check per layer
+
+python main_experiment.py \
+  --model_name google/gemma-2-2b --task ioi --num_examples 1000 \
+  --method eap_ig --granularity feature --sae-release google/gemma-scope-2b-pt-res --sae-width 16k --sae-l0 100 \
+  --top_k_list 1,5,10,20,30 --reuse-thresholds 50,75,85,90,95,96,97,98,99,100 \
+  --dtype bf16 --amp --device cuda \
+  --run-name sae_eap_ig_feature --output-dir results/sae/extraction --cache-dir cache_sae/eap_ig_feature
+
+python cross_task_experiment.py \
+  --results-dir results/sae/extraction/sae_eap_ig_feature \
+  --model_name google/gemma-2-2b --method eap_ig --granularity feature --sae-width 16k --sae-l0 100 \
+  --tasks addition,arc_challenge,arc_easy,boolean,ioi,mcqa --K 10 --threshold 50,75,85,100 \
+  --ablation zero,mean_pos --num-examples 100 --digits 3 --device cuda --output-dir results/sae/cross_task/eap_ig_feature
+```
+
+`--sae-release`, `--sae-width` and `--sae-l0` name the SAE set. Gemma Scope ships several SAEs per layer and width, differing in sparsity; per layer, the one whose average L0 is closest to `--sae-l0` is used, and the chosen paths are recorded under `sae.paths` in `metrics.json`. The SAEs are held in float32 (about 8 GB for 26 layers at width 16k). Extraction and cross-task runs must name the same SAE set, and the attribution cache key includes it.
+
+Two definitions change at this granularity. Only features whose activation differs between the clean and corrupted input receive a score, so top-K is K% of those features rather than of all latents, and per-example circuits vary in size (`avg_circuit_size` and `scored_components_per_example` are recorded). The control circuit is sampled from the features attributed on at least one training example, since a random draw from all latents would be inactive on the task and ablate nothing.
+
 ### 3. Aggregation and figures
 
 ```bash
@@ -112,8 +137,9 @@ The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) pred
 | Argument | Meaning |
 |---|---|
 | `--method` | Attribution method: `eap`, `eap_ig`, or `relp`. `neuron_attr` is a deprecated alias for `--method relp --granularity neuron`. |
-| `--granularity` | `head_mlp` scores attention heads at `attn.hook_z` and MLP blocks at `hook_mlp_out`; `neuron` scores MLP neurons at `mlp.hook_post` and is supported by `eap_ig` and `relp`. |
-| `--top_k_list` | Per-example circuit sizes, as percentages of all components. |
+| `--granularity` | `head_mlp` scores attention heads at `attn.hook_z` and MLP blocks at `hook_mlp_out`; `neuron` scores MLP neurons at `mlp.hook_post`; `feature` scores SAE latents at `sae.hook_sae_acts_post`. `neuron` and `feature` are supported by `eap_ig` and `relp`. |
+| `--sae-release`, `--sae-width`, `--sae-l0`, `--sae-layers` | The SAE set for `--granularity feature` (see [SAE features](#sae-features)). |
+| `--top_k_list` | Per-example circuit sizes, as percentages of all components (of the scored features at `feature` granularity). |
 | `--reuse-thresholds` | The consensus thresholds P, as percentages. |
 | `--perm-trials` | Number of trials for the paired permutation test of the shared circuit against the control. |
 | `--ig-steps` | Number of integrated-gradients interpolation steps for `eap_ig` (default 5). |
