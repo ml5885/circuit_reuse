@@ -9,7 +9,10 @@ from datasets import load_dataset
 
 @dataclass
 class Example:
-    """Stores a clean and corrupted pair. Optional label set for MC-style eval."""
+    """A clean and corrupted pair. ``target`` is the continuation the model should produce,
+    spelled as it follows the prompt (e.g. " Phil", " D", " true"); the attribution metric
+    appends its tokens to the prompt's. For label tasks ``labels`` are the bare labels and
+    ``labels[answer_idx]`` is the gold one."""
     prompt: str
     target: str
     corrupted_prompt: str
@@ -172,10 +175,10 @@ class MMLUDataset:
         choices = item["choices"]
         ans_idx = item["answer"]
 
-        prompt = f"{q}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer: "
+        prompt = f"{q}\nA. {choices[0]}\nB. {choices[1]}\nC. {choices[2]}\nD. {choices[3]}\nAnswer:"
         if max_prompt_chars is not None and len(prompt) > max_prompt_chars:
             return None
-        target = chr(ord("A") + ans_idx)
+        target = " " + chr(ord("A") + ans_idx)
         labels = ["A", "B", "C", "D"]
 
         shuffled = choices[:]
@@ -189,9 +192,9 @@ class MMLUDataset:
             f"B. {shuffled[1]}\n"
             f"C. {shuffled[2]}\n"
             f"D. {shuffled[3]}\n"
-            f"Answer: "
+            f"Answer:"
         )
-        corrupted_target = chr(ord("A") + new_ans_idx)
+        corrupted_target = " " + chr(ord("A") + new_ans_idx)
         return Example(prompt, target, corrupted_prompt, corrupted_target, labels=labels, answer_idx=ans_idx)
 
     def __init__(
@@ -235,16 +238,14 @@ class IOIDataset:
         self._examples: List[Example] = []
         count = 0
         for item in ds:
-            # Add explicit boundary space. Keep both candidate names as labels.
-            prompt = item["prompt"].rstrip() + " "
+            prompt = item["prompt"].rstrip()
             choices = list(item["choices"])
             answer_idx = int(item["answerKey"])
-            target = choices[answer_idx]
+            target = " " + choices[answer_idx]
 
-            # Use the IO flip counterfactual by default for IOI
-            cf = item.get("s2_io_flip_counterfactual", item["random_names_counterfactual"])
-            corrupted_prompt = cf["prompt"].rstrip() + " "
-            corrupted_target = target  # unused for scoring
+            cf = item["s2_io_flip_counterfactual"]
+            corrupted_prompt = cf["prompt"].rstrip()
+            corrupted_target = " " + cf["choices"][int(cf["answerKey"])]
 
             self._examples.append(
                 Example(prompt, target, corrupted_prompt, corrupted_target, labels=choices, answer_idx=answer_idx)
@@ -281,11 +282,11 @@ class MCQADataset:
         for item in ds:
             prompt = item["prompt"]
             labels = list(item["choices"]["label"])
-            target = item["choices"]["label"][item["answerKey"]]
+            target = " " + item["choices"]["label"][item["answerKey"]]
 
             cf = item["answerPosition_counterfactual"]
             corrupted_prompt = cf["prompt"]
-            corrupted_target = cf["choices"]["label"][cf["answerKey"]]
+            corrupted_target = " " + cf["choices"]["label"][cf["answerKey"]]
 
             self._examples.append(Example(prompt, target, corrupted_prompt, corrupted_target, labels=labels, answer_idx=int(item["answerKey"])))
             count += 1
@@ -313,11 +314,11 @@ class ARCDataset:
         for item in ds:
             prompt = item["prompt"]
             labels = list(item["choices"]["label"])
-            target = item["choices"]["label"][item["answerKey"]]
+            target = " " + item["choices"]["label"][item["answerKey"]]
 
             cf = item["answerPosition_counterfactual"]
             corrupted_prompt = cf["prompt"]
-            corrupted_target = cf["choices"]["label"][cf["answerKey"]]
+            corrupted_target = " " + cf["choices"]["label"][cf["answerKey"]]
 
             self._examples.append(Example(prompt, target, corrupted_prompt, corrupted_target, labels=labels, answer_idx=int(item["answerKey"])))
             count += 1

@@ -124,22 +124,25 @@ class CircuitExtractor:
         return metric
 
     def _prepare_paired_inputs(self, example: Example):
-        """Tokenize clean and corrupted, pad to the same length, build metric fn."""
+        """Tokenize clean and corrupted, pad to the same length, build metric fn.
+
+        The answer's tokens are appended to the prompt's tokens rather than tokenizing the
+        concatenated string, so the answer sits exactly at the positions the metric reads.
+        Clean and corrupted prompts must have the same length: the metric reads both runs
+        at the clean prompt's answer position, and EAP-IG interpolates them position by position.
+        """
         device = self.model.cfg.device
         prompt_tok = self.model.to_tokens(example.prompt, prepend_bos=True)
-        clean_full = self.model.to_tokens(example.prompt + example.target, prepend_bos=True)
-        corrupted_full = self.model.to_tokens(
-            example.corrupted_prompt + example.corrupted_target, prepend_bos=True
-        )
+        corrupted_prompt_tok = self.model.to_tokens(example.corrupted_prompt, prepend_bos=True)
+        target_tok = self.model.to_tokens(example.target, prepend_bos=False)
+        corrupted_target_tok = self.model.to_tokens(example.corrupted_target, prepend_bos=False)
+        if prompt_tok.shape[1] != corrupted_prompt_tok.shape[1]:
+            raise ValueError(f"clean and corrupted prompts differ in length ({prompt_tok.shape[1]} vs "
+                             f"{corrupted_prompt_tok.shape[1]} tokens): {example.prompt!r}")
+        clean_full = torch.cat([prompt_tok, target_tok], dim=1)
+        corrupted_full = torch.cat([corrupted_prompt_tok, corrupted_target_tok], dim=1)
 
-        p_ids, f_ids = prompt_tok.tolist()[0], clean_full.tolist()[0]
-        lcp = 0
-        while lcp < len(p_ids) and lcp < len(f_ids) and p_ids[lcp] == f_ids[lcp]:
-            lcp += 1
-        gold_ids_list = (
-            f_ids[lcp:] if lcp < len(f_ids)
-            else self.model.to_tokens(example.target, prepend_bos=False).tolist()[0]
-        )
+        gold_ids_list = target_tok[0].tolist()
         target_ids = torch.tensor(gold_ids_list, device=device, dtype=torch.long)
         prompt_len = prompt_tok.shape[1]
         positions = torch.arange(

@@ -238,7 +238,7 @@ def evaluate_accuracy_with_mean_ablation(
             elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
                 labels = ex.labels or ["A", "B", "C", "D"]
                 pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == ex.target:
+                if pred_label == ex.target.strip():
                     correct += 1
             else:
                 if _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose):
@@ -401,7 +401,7 @@ def evaluate_accuracy(model: Any, dataset: Iterable[Example], task: str, verbose
             elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
                 labels = ex.labels or ["A", "B", "C", "D"]
                 pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == target:
+                if pred_label == target.strip():
                     correct += 1
 
             else:
@@ -440,7 +440,7 @@ def evaluate_accuracy_with_ablation(
             elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
                 labels = ex.labels or ["A", "B", "C", "D"]
                 pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == ex.target:
+                if pred_label == ex.target.strip():
                     correct += 1
 
             else:
@@ -497,7 +497,7 @@ def evaluate_predictions(
                 elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
                     labels = ex.labels or ["A", "B", "C", "D"]
                     pred_label = _classify_from_labels(logits_last, model, labels)
-                    gold = ex.target
+                    gold = ex.target.strip()
                     ok = (pred_label == gold)
                     per_ex.append({"prompt": ex.prompt, "target": gold, "pred": pred_label, "is_correct": bool(ok)})
 
@@ -564,8 +564,8 @@ def evaluate_graded(model: Any, dataset: Iterable[Example], task: str,
                 row["io_rank"] = float((logits_last > logits_last[best]).sum())
             elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
                 labels = ex.labels or ["A", "B", "C", "D"]
-                row["correct"] = float(_classify_from_labels(logits_last, model, labels) == ex.target)
-                row["logprob"] = float(torch.logsumexp(logp[_label_token_ids(model, ex.target)], 0))
+                row["correct"] = float(_classify_from_labels(logits_last, model, labels) == ex.target.strip())
+                row["logprob"] = float(torch.logsumexp(logp[_label_token_ids(model, ex.target.strip())], 0))
             else:
                 gold_ids = _extract_gold_ids(model, ex.prompt, ex.target, device)
                 row["correct"] = float(_check_addition_correct(model, ex.prompt, ex.target, device, logits_last))
