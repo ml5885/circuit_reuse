@@ -63,8 +63,12 @@ class CircuitExtractor:
         use_lrp: Optional[bool] = None,
         lrp_rules: Optional[Iterable[str]] = None,
         ig_steps: int = 5,
+        node_scores: bool = False,
     ) -> None:
         self.model = model
+        # EAP-IG scores components through their outgoing edges by default; with node_scores
+        # it scores each head and MLP block directly, as at neuron granularity and in RelP.
+        self.node_scores = node_scores
         self.method = method
         self.granularity = granularity
         self.task_metric = task_metric
@@ -84,7 +88,7 @@ class CircuitExtractor:
                 )
             self.graph = (
                 Graph.from_model(model, granularity=granularity)
-                if granularity == "head_mlp"
+                if granularity == "head_mlp" and not node_scores
                 else None
             )
         elif method == "relp":
@@ -306,7 +310,7 @@ class CircuitExtractor:
 
         if self.method == "relp":
             return self._extract_relp(examples, task_name, device, autocast_ctx)
-        if self.method == "eap_ig" and self.granularity in ("neuron", "feature"):
+        if self.method == "eap_ig" and (self.granularity in ("neuron", "feature") or self.node_scores):
             return self._extract_eap_ig_neurons(examples, task_name, autocast_ctx)
         return self._extract_edge_graph(examples, task_name, device, autocast_ctx)
 

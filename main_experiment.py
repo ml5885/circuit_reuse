@@ -129,6 +129,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument("--node-scores", action="store_true",
+                        help="EAP-IG at head_mlp: score each head and MLP block directly instead of summing |edge scores|.")
+    parser.add_argument("--rank-magnitude", action="store_true",
+                        help="Take each example's top-K%% by |score| instead of signed score.")
     parser.add_argument("--dtype", type=str, default="auto", choices=["auto", "bf16", "float16", "float32"], help="Load dtype.")
     parser.add_argument("--log-mem", action="store_true", help="Print CUDA memory after the run.")
     parser.add_argument("--amp", action="store_true", help="Use autocast (mixed precision) during extraction.")
@@ -260,7 +264,8 @@ def _permutation_test(shared_flags: List[int], control_flags: List[int], rng: ra
     return {"p_value": float(p), "obs_diff": float(obs), "trials": int(trials)}
 
 
-def _build_topk_example_sets(per_example_scores: List[Dict[Component, float]], k: int) -> List[set]:
+def _build_topk_example_sets(per_example_scores: List[Dict[Component, float]], k: int,
+                             magnitude: bool = False) -> List[set]:
     """Build sets of the top-k% components for each example. Every component is
     scored at head_mlp and neuron granularity, so k% is of all components; at
     feature granularity only features active on the example are scored, so k% is
@@ -268,7 +273,7 @@ def _build_topk_example_sets(per_example_scores: List[Dict[Component, float]], k
     sets = []
     for sc in per_example_scores:
         take = max(1, int(len(sc) * k / 100))
-        ranked = sorted(sc.items(), key=lambda x: x[1], reverse=True)
+        ranked = sorted(sc.items(), key=lambda x: abs(x[1]) if magnitude else x[1], reverse=True)
         sets.append({c for c, _ in ranked[:take]})
     return sets
 
@@ -430,6 +435,8 @@ def _run_single_combination(
     score_filter: float | None = None,
     ig_steps: int = 5,
     task_metric: str = "logprob",
+    node_scores: bool = False,
+    rank_magnitude: bool = False,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -461,6 +468,7 @@ def _run_single_combination(
     if granularity == "feature":
         gran_suffix += f"-{model.sae_spec.slug}"
     method_suffix = f"{method}__ig{ig_steps}" if method == "eap_ig" else method
+    method_suffix += "__node" if node_scores else ""
     metric_suffix = "" if task_metric == "logprob" else f"__tm{task_metric}"
     # RelP caches are keyed by rule set: files without a tag predate 2026-09-21
     # and hold LEGACY_LRP_RULES scores, so they are never reused.
@@ -518,6 +526,7 @@ def _run_single_combination(
                 use_lrp=use_lrp,
                 lrp_rules=lrp_rules,
                 ig_steps=ig_steps,
+                node_scores=node_scores,
             )
             start = time.time()
             try:
@@ -572,6 +581,8 @@ def _run_single_combination(
         "granularity": granularity,
         "task_metric": task_metric,
         "ig_steps": int(ig_steps) if method == "eap_ig" else None,
+        "node_scores": node_scores,
+        "rank_magnitude": rank_magnitude,
         "lrp_rules": list(lrp_rules or DEFAULT_LRP_RULES) if lrp_active else None,
         "top_k_list": list(sorted(set(int(k) for k in top_k_list))),
         "reuse_thresholds": list(sorted(set(int(p) for p in reuse_thresholds))),
@@ -807,7 +818,7 @@ def _run_single_combination(
     for K in metrics["top_k_list"]:
         if K <= 0:
             continue
-        sets_k = _build_topk_example_sets(example_scores, K)
+        sets_k = _build_topk_example_sets(example_scores, K, magnitude=rank_magnitude)
         take_components = sum(len(s) for s in sets_k) / max(1, len(sets_k))
         counts = _count_components(sets_k)
         n_ex = len(sets_k)
@@ -1032,6 +1043,8 @@ def main():
             score_filter=args.score_filter,
             ig_steps=args.ig_steps,
             task_metric=args.task_metric,
+            node_scores=args.node_scores,
+            rank_magnitude=args.rank_magnitude,
         )
     except Exception as e:
         print(f"[FATAL] {e}")
