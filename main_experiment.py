@@ -133,6 +133,9 @@ def parse_args() -> argparse.Namespace:
                         help="EAP-IG at head_mlp: score each head and MLP block directly instead of summing |edge scores|.")
     parser.add_argument("--rank-magnitude", action="store_true",
                         help="Take each example's top-K%% by |score| instead of signed score.")
+    parser.add_argument("--necessity-sweeps", type=str, default=None, metavar="K,P",
+                        help="Run ablations only on the K sweep at this P and the P sweep at this K; "
+                             "other cells get reuse and circuit size only.")
     parser.add_argument("--dtype", type=str, default="auto", choices=["auto", "bf16", "float16", "float32"], help="Load dtype.")
     parser.add_argument("--log-mem", action="store_true", help="Print CUDA memory after the run.")
     parser.add_argument("--amp", action="store_true", help="Use autocast (mixed precision) during extraction.")
@@ -437,6 +440,7 @@ def _run_single_combination(
     task_metric: str = "logprob",
     node_scores: bool = False,
     rank_magnitude: bool = False,
+    necessity_sweeps: tuple[int, int] | None = None,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -583,6 +587,7 @@ def _run_single_combination(
         "ig_steps": int(ig_steps) if method == "eap_ig" else None,
         "node_scores": node_scores,
         "rank_magnitude": rank_magnitude,
+        "necessity_sweeps": necessity_sweeps,
         "lrp_rules": list(lrp_rules or DEFAULT_LRP_RULES) if lrp_active else None,
         "top_k_list": list(sorted(set(int(k) for k in top_k_list))),
         "reuse_thresholds": list(sorted(set(int(p) for p in reuse_thresholds))),
@@ -831,6 +836,15 @@ def _run_single_combination(
             shared_size = len(shared)
             # Reuse percent is capped at 100
             reuse_percent = float(min(shared_size, take_components) / max(1, take_components) * 100.0)
+            if necessity_sweeps and K != necessity_sweeps[0] and thr != necessity_sweeps[1]:
+                per_thresh[str(thr)] = {
+                    "threshold": thr,
+                    "shared_circuit_size": shared_size,
+                    "avg_circuit_size": take_components,
+                    "reuse_percent": reuse_percent,
+                    "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
+                }
+                continue
 
             # Evaluate ablations and collect per-example correctness for permutation tests
             rng_seed = int(hashlib.md5(f"{combo_key_root}|K{K}|p{thr}".encode("utf-8")).hexdigest()[:8], 16)
@@ -1045,6 +1059,7 @@ def main():
             task_metric=args.task_metric,
             node_scores=args.node_scores,
             rank_magnitude=args.rank_magnitude,
+            necessity_sweeps=tuple(_parse_int_list(args.necessity_sweeps)) if args.necessity_sweeps else None,
         )
     except Exception as e:
         print(f"[FATAL] {e}")
