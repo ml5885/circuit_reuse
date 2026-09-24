@@ -42,6 +42,12 @@ class AdditionDataset:
         pairs = [self._generate_single_example() for _ in range(self.num_examples)]
         shuffled = pairs[:]
         random.shuffle(shuffled)
+        # An example paired with itself has identical clean and corrupted runs, so every
+        # attribution score is zero and its circuit is arbitrary: swap it with a neighbour.
+        for i in range(len(pairs)):
+            if shuffled[i] == pairs[i] and len(pairs) > 1:
+                j = (i + 1) % len(pairs)
+                shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
         for (prompt, target), (corrupted_prompt, corrupted_target) in zip(pairs, shuffled):
             self._examples.append(Example(prompt, target, corrupted_prompt, corrupted_target))
 

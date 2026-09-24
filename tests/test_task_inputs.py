@@ -46,6 +46,12 @@ def test_counterfactual_changes_the_answer(task):
     assert all(ex.target != ex.corrupted_target for ex in examples(task))
 
 
+@pytest.mark.parametrize("task", TASKS)
+def test_no_example_is_its_own_counterfactual(task):
+    """Identical clean and corrupted inputs make every attribution score zero."""
+    assert all(ex.prompt != ex.corrupted_prompt for ex in examples(task, n=500))
+
+
 class FakeModel:
     """Character-level tokenizer: every string's first token is its first character."""
 
