@@ -109,6 +109,8 @@ def main():
             "circuit": summarize_graded(evaluate_graded(model, ds, task, _build_ablation_hooks(kept))),
             "errors": summarize_graded(evaluate_graded(model, ds, task, err)),
             "circuit_and_errors": summarize_graded(evaluate_graded(model, ds, task, _build_ablation_hooks(kept) + err)),
+            # One layer's error term at a time, to see where the effect of replacing all of them comes from.
+            "errors_by_layer": [summarize_graded(evaluate_graded(model, ds, task, [h])) for h in err],
         }
         r = results[task]
         print(f"[{task}] error share of |attr| {r['attribution']['error_share_abs']:.2f}; accuracy "
