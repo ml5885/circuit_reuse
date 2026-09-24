@@ -16,7 +16,16 @@ Gradients follow the same convention: the metric's gradient with respect to
 ``x`` is the identity, so upstream layers see the same gradient as without the
 SAE.
 
+A cross-layer transcoder (CLT; circuit-tracer's ``mntss/clt-gemma-2-2b-426k``, Ameisen et
+al. 2025) is spliced the same way with ``--sae-kind clt``: layer L's features read
+``blocks.{L}.hook_resid_mid`` and their decoders write into ``hook_mlp_out`` of layer L and
+every later layer. Each MLP output becomes ``mlp_out + sum_L (acts_L - acts_L.clean) W_dec``,
+so the unablated forward pass is unchanged, ablating a feature removes its decoded
+contribution from every downstream MLP output, and the MLPs themselves play the role of the
+error term. Layer L's feature activations sit at the same hook point as an SAE's.
+
     python -m circuit_reuse.sae --model google/gemma-2-2b   # reconstruction check
+    python -m circuit_reuse.sae --model google/gemma-2-2b --sae-kind clt --sae-release mntss/clt-gemma-2-2b-426k
 """
 from __future__ import annotations
 
@@ -29,6 +38,7 @@ import numpy as np
 import torch
 from torch import nn
 from huggingface_hub import hf_hub_download, list_repo_files
+from safetensors.torch import load_file
 from transformer_lens.hook_points import HookPoint
 
 FEATURE_HOOK = "blocks.{layer}.sae.hook_sae_acts_post"
@@ -44,9 +54,12 @@ class SAESpec:
     l0: int = 100
     layers: Optional[tuple[int, ...]] = None
     dtype: str = "float32"
+    kind: str = "sae"  # or "clt"
 
     @property
     def slug(self) -> str:
+        if self.kind == "clt":
+            return self.release.split("/")[-1]
         suffix = "" if self.dtype == "float32" else f"-{self.dtype}"
         return f"{self.release.split('/')[-1]}-{self.width}-l0{self.l0}{suffix}"
 
@@ -104,9 +117,82 @@ def load_saes(spec: SAESpec, n_layers: int, device: str, dtype=torch.float32) ->
     return saes
 
 
+class CLTLayer(nn.Module):
+    """Layer ``layer``'s CLT features: a ReLU encoder on the pre-MLP residual stream and a
+    decoder into the MLP output of this and every later layer (``W_dec``: d_sae x
+    (n_layers - layer) x d_model, flattened over the last two axes)."""
+
+    def __init__(self, layer, W_enc, b_enc, W_dec, b_dec, path: str = ""):
+        super().__init__()
+        self.layer = layer
+        self.W_enc = nn.Parameter(W_enc, requires_grad=False)
+        self.b_enc = nn.Parameter(b_enc, requires_grad=False)
+        self.W_dec = nn.Parameter(W_dec.flatten(1), requires_grad=False)
+        self.b_dec = nn.Parameter(b_dec, requires_grad=False)
+        self.path = path
+        self.delta = None
+        self.hook_sae_acts_post = HookPoint()
+
+    @property
+    def d_sae(self) -> int:
+        return self.W_enc.shape[0]
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.relu(x.to(self.W_enc.dtype) @ self.W_enc.T + self.b_enc).float()
+
+    def decoder_to(self, target: int) -> torch.Tensor:
+        d, j = self.b_dec.shape[0], target - self.layer
+        return self.W_dec[:, j * d:(j + 1) * d]
+
+    def read(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode, pass the activations through the hook point, and keep the change the hooks
+        made (zero with a gradient path when the extractor scores the features)."""
+        acts = self.encode(x.detach())
+        if torch.is_grad_enabled():
+            acts.requires_grad_(True)
+        post = self.hook_sae_acts_post(acts)
+        self.delta = None if post is acts and not torch.is_grad_enabled() else post - acts.detach()
+        return x
+
+
+def load_clt(release: str, n_layers: int, device: str, dtype=torch.bfloat16) -> Dict[int, CLTLayer]:
+    layers = {}
+    for layer in range(n_layers):
+        enc = load_file(hf_hub_download(release, f"W_enc_{layer}.safetensors"), device=device)
+        dec = load_file(hf_hub_download(release, f"W_dec_{layer}.safetensors"), device=device)
+        layers[layer] = CLTLayer(layer, enc[f"W_enc_{layer}"].to(dtype), enc[f"b_enc_{layer}"].to(dtype),
+                                 dec[f"W_dec_{layer}"].to(dtype), enc[f"b_dec_{layer}"].to(dtype),
+                                 path=f"{release}/W_enc_{layer}")
+    return layers
+
+
+def attach_clt(model, spec: SAESpec) -> Dict[int, CLTLayer]:
+    """Splice a CLT: encode at ``hook_resid_mid``, add the hooks' changes to the features,
+    decoded, to ``hook_mlp_out`` of every layer at or after the features' own."""
+    layers = load_clt(spec.release, model.cfg.n_layers, model.cfg.device, getattr(torch, spec.dtype))
+    for layer, clt in layers.items():
+        model.blocks[layer].add_module("sae", clt)
+        model.add_hook(f"blocks.{layer}.hook_resid_mid", lambda x, hook, clt=clt: clt.read(x), is_permanent=True)
+
+        def write(y, hook=None, target=layer):
+            deltas = [(src, src.delta) for src in (layers[l] for l in range(target + 1)) if src.delta is not None]
+            if not deltas:
+                return y
+            out = y.float() + sum(d.to(src.W_dec.dtype) @ src.decoder_to(target) for src, d in deltas).float()
+            return out.to(y.dtype)
+        model.add_hook(f"blocks.{layer}.hook_mlp_out", write, is_permanent=True)
+    model.setup()
+    model.sae_spec = spec
+    model.clt = layers
+    return layers
+
+
 def attach_saes(model, spec: SAESpec, saes: Optional[Dict[int, JumpReLUSAE]] = None) -> Dict[int, JumpReLUSAE]:
     """Splice one SAE per layer into ``blocks.{L}.hook_resid_post`` as a permanent
-    hook, and register the feature hook points with the model."""
+    hook, and register the feature hook points with the model. A CLT spec is
+    spliced by ``attach_clt``."""
+    if spec.kind == "clt":
+        return attach_clt(model, spec)
     if saes is None:
         saes = load_saes(spec, model.cfg.n_layers, model.cfg.device, getattr(torch, spec.dtype))
     for layer, sae in saes.items():
@@ -133,12 +219,15 @@ def add_sae_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sae-layers", default=None, help="comma-separated layers (default: all)")
     parser.add_argument("--sae-dtype", default=SAESpec.dtype, choices=["float32", "bfloat16"],
                         help="width 65k needs bfloat16 to fit on a 32 GB card (29 GiB against 15 GiB)")
+    parser.add_argument("--sae-kind", default=SAESpec.kind, choices=["sae", "clt"],
+                        help="clt: a cross-layer transcoder in circuit-tracer's format (--sae-release mntss/clt-gemma-2-2b-426k)")
 
 
 def spec_from_args(args) -> SAESpec:
     layers = tuple(int(x) for x in args.sae_layers.split(",")) if args.sae_layers else None
-    return SAESpec(release=args.sae_release, width=args.sae_width, l0=args.sae_l0, layers=layers,
-                   dtype=getattr(args, "sae_dtype", SAESpec.dtype))
+    kind = getattr(args, "sae_kind", SAESpec.kind)
+    dtype = "bfloat16" if kind == "clt" else getattr(args, "sae_dtype", SAESpec.dtype)
+    return SAESpec(release=args.sae_release, width=args.sae_width, l0=args.sae_l0, layers=layers, dtype=dtype, kind=kind)
 
 
 @torch.inference_mode()
@@ -146,6 +235,8 @@ def reconstruction_report(model, prompts: Iterable[str]) -> Dict[int, dict]:
     """Per layer: fraction of variance unexplained by the SAE and mean L0, over
     the non-BOS positions of ``prompts``. A basis mismatch shows up as FVU near
     or above 1."""
+    if hasattr(model, "clt"):
+        return clt_reconstruction_report(model, prompts)
     layers = attached_sae_layers(model)
     stats = {layer: dict(resid=0.0, err=0.0, l0=0.0, n=0) for layer in layers}
 
@@ -168,6 +259,29 @@ def reconstruction_report(model, prompts: Iterable[str]) -> Dict[int, dict]:
             model(model.to_tokens(prompt, prepend_bos=True).to(model.cfg.device))
     return {layer: dict(fvu=s["err"] / s["resid"], l0=s["l0"] / s["n"], path=model.blocks[layer].sae.path)
             for layer, s in stats.items()}
+
+
+@torch.inference_mode()
+def clt_reconstruction_report(model, prompts: Iterable[str]) -> Dict[int, dict]:
+    """Per layer: fraction of the MLP output's variance the CLT leaves unexplained, and the
+    mean L0 of the layer's features, over the non-BOS positions of ``prompts``."""
+    clt = model.clt
+    n = len(clt)
+    stats = {layer: dict(resid=0.0, err=0.0, l0=0.0, n=0) for layer in clt}
+    acts, outs = {}, {}
+    hooks = [(f"blocks.{l}.hook_resid_mid", lambda x, hook, l=l: acts.__setitem__(l, clt[l].encode(x[:, 1:]))) for l in clt]
+    hooks += [(f"blocks.{l}.hook_mlp_out", lambda y, hook, l=l: outs.__setitem__(l, y[:, 1:].float())) for l in clt]
+    for prompt in prompts:
+        with model.hooks(fwd_hooks=hooks):
+            model(model.to_tokens(prompt, prepend_bos=True).to(model.cfg.device))
+        for m in range(n):
+            recon = sum(acts[l].to(clt[l].W_dec.dtype) @ clt[l].decoder_to(m) for l in range(m + 1)).float() + clt[m].b_dec.float()
+            y, s = outs[m], stats[m]
+            s["resid"] += float(((y - y.mean(dim=(0, 1))) ** 2).sum())
+            s["err"] += float(((y - recon) ** 2).sum())
+            s["l0"] += float((acts[m] > 0).sum())
+            s["n"] += y.shape[0] * y.shape[1]
+    return {layer: dict(fvu=s["err"] / s["resid"], l0=s["l0"] / s["n"], path=clt[layer].path) for layer, s in stats.items()}
 
 
 def main():
