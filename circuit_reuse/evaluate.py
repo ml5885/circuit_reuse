@@ -320,7 +320,7 @@ _BOOL_CACHE = {}
 
 
 def _boolean_token_id_groups(model) -> Tuple[set, set]:
-    cache_key = id(model)
+    cache_key = model.cfg.model_name
     if cache_key in _BOOL_CACHE:
         return _BOOL_CACHE[cache_key]
     variants_true = [" true", "true", " True", "True"]
@@ -346,7 +346,7 @@ def _classify_boolean(logits_last: Any, model, verbose: bool = False) -> Tuple[s
     id_logits.update({f"false:{fid}": float(logits_last[fid].item()) for fid in false_ids})
     true_score = max((logits_last[tid].item() for tid in true_ids), default=float("-inf"))
     false_score = max((logits_last[fid].item() for fid in false_ids), default=float("-inf"))
-    label = "true" if true_score >= false_score else "false"
+    label = " true" if true_score >= false_score else " false"
     if verbose:
         print(f"[BOOL] true={true_score:.3f} false={false_score:.3f} -> {label}")
     return label, id_logits
@@ -549,7 +549,7 @@ def evaluate_graded(model: Any, dataset: Iterable[Example], task: str,
             row: Dict[str, float] = {}
             if task == "boolean":
                 true_ids, false_ids = _boolean_token_id_groups(model)
-                gold = sorted(true_ids if ex.target == "true" else false_ids)
+                gold = sorted(true_ids if ex.target == " true" else false_ids)
                 row["correct"] = float(_classify_boolean(logits_last, model)[0] == ex.target)
                 row["logprob"] = float(torch.logsumexp(logp[gold], 0))
             elif task == "ioi":

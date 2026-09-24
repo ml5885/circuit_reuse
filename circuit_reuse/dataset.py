@@ -52,6 +52,17 @@ class AdditionDataset:
         return iter(self._examples)
 
 
+# Without demonstrations, "Evaluate: ... = " is answered with a digit ("1", "0") by every model,
+# leaving under 3% of the probability on "true" and "false". Four solved examples, two of each
+# answer, move 85-99% of it onto the two answers.
+BOOLEAN_FEW_SHOT_PREFIX = (
+    "Evaluate: true or not true and not true = true\n"
+    "Evaluate: false or false and not true = false\n"
+    "Evaluate: (true or true) and true = true\n"
+    "Evaluate: false or (true and (true and true)) and false = false\n"
+)
+
+
 class BooleanDataset:
     def __init__(
         self,
@@ -124,10 +135,10 @@ class BooleanDataset:
             if corrupted_expr is None:
                 continue
 
-            prompt = f"Evaluate: {expr} = "
-            target = str(self._evaluate(expr)).lower()
-            corrupted_prompt = f"Evaluate: {corrupted_expr} = "
-            corrupted_target = str(self._evaluate(corrupted_expr)).lower()
+            prompt = f"{BOOLEAN_FEW_SHOT_PREFIX}Evaluate: {expr} ="
+            target = " " + str(self._evaluate(expr)).lower()
+            corrupted_prompt = f"{BOOLEAN_FEW_SHOT_PREFIX}Evaluate: {corrupted_expr} ="
+            corrupted_target = " " + str(self._evaluate(corrupted_expr)).lower()
 
             self._examples.append(Example(prompt, target, corrupted_prompt, corrupted_target))
 
