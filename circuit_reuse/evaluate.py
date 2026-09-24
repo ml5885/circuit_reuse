@@ -6,7 +6,7 @@ import torch
 from .dataset import Example
 from .circuit_extraction import Component
 from .sae import FEATURE_HOOK, attached_sae_layers
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 
 KIND_KEYS = {"head": "z", "mlp": "mlp_out", "neuron": "neuron_post", "feature": "sae_acts"}
@@ -374,6 +374,20 @@ def _greedy_batch(model: Any, tokens: torch.Tensor, first: torch.Tensor, steps: 
     return torch.stack(generated, dim=1)
 
 
+@contextmanager
+def _without_attn_result(model: Any):
+    """Turn off per-head attention results (set by edge attribution) while evaluating: the
+    ablation hooks act on hook_z, and the per-head result tensor is (batch, pos, heads,
+    d_head, d_model), which does not fit in memory at evaluation batch sizes."""
+    cfg = model.cfg
+    saved = getattr(cfg, "use_attn_result", False)
+    cfg.use_attn_result = False
+    try:
+        yield
+    finally:
+        cfg.use_attn_result = saved
+
+
 def _predict(model: Any, dataset: Iterable[Example], task: str, hooks=(), verbose: bool = False) -> List[Dict[str, Any]]:
     """Per-example predictions of the model under ``hooks``:
     {"prompt", "target", "pred", "is_correct"} (no "pred" for addition)."""
@@ -381,7 +395,7 @@ def _predict(model: Any, dataset: Iterable[Example], task: str, hooks=(), verbos
     dataset = list(dataset)
     rows: List[Dict[str, Any]] = [None] * len(dataset)
     ctx = model.hooks(fwd_hooks=list(hooks)) if hooks else nullcontext()
-    with ctx, torch.inference_mode():
+    with ctx, torch.inference_mode(), _without_attn_result(model):
         for idx, tokens in _length_batches(model, dataset):
             logits_last = model(tokens)[:, -1]
             if task not in ("boolean", "ioi", "mmlu", "mcqa", "arc_easy", "arc_challenge"):  # addition
