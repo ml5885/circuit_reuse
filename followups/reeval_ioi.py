@@ -26,7 +26,10 @@ from pathlib import Path
 from circuit_reuse.evaluate import (_build_ablation_hooks, _build_mean_ablation_hooks, compute_corrupted_means,
                                     evaluate_graded)
 from cross_task_experiment import find_metrics_file, load_shared_components, parse_component_str
+from circuit_reuse.sae import SAESpec, attach_saes
 from followups.common import EXTRACT, OUT, TASKS, eval_datasets, load_model, train_examples, write_json
+
+SAE_ROOT = Path("results/sae/extraction/sae_eap_ig_feature")
 from main_experiment import _enumerate_all_components, _sample_control_components
 
 
@@ -47,12 +50,19 @@ class Evaluator:
         return self.cache[key]
 
 
+def root(method, gran):
+    return SAE_ROOT if gran == "feature" else EXTRACT / f"granularity_parity_{method}_{gran}"
+
+
 def necessity(model, name, method, gran):
-    path = find_metrics_file(EXTRACT / f"granularity_parity_{method}_{gran}", name, None, "ioi",
-                             method=method, granularity=gran)
+    path = find_metrics_file(root(method, gran), name, None, "ioi", method=method, granularity=gran)
     m = json.loads(path.read_text())
     ev = Evaluator(model, train_examples("ioi", name))
-    units = _enumerate_all_components(model, granularity=gran, method=method)
+    example_scores = None
+    if gran == "feature":  # the control pool is the latents scored on the training examples
+        from main_experiment import _load_cached_attributions
+        example_scores = _load_cached_attributions(next(Path("cache_sae/eap_ig_feature").glob("*__ioi__*.jsonl")))
+    units = _enumerate_all_components(model, granularity=gran, method=method, example_scores=example_scores)
     base = ev(())
     out = {"baseline": base, "cells": {}}
     for K, by_k in m["by_k"].items():
@@ -76,12 +86,11 @@ def necessity(model, name, method, gran):
 
 
 def cross(model, name, method, gran):
-    root = EXTRACT / f"granularity_parity_{method}_{gran}"
     ds = eval_datasets(name)["ioi"]
-    kinds = ("neuron",) if gran == "neuron" else ("head", "mlp")
+    kinds = {"neuron": ("neuron",), "feature": ("feature",)}.get(gran, ("head", "mlp"))
     zero = Evaluator(model, ds)
     mean = Evaluator(model, ds, compute_corrupted_means(model, ds, per_position=True, kinds=kinds))
-    metrics = {t: json.loads(find_metrics_file(root, name, None, t, method=method, granularity=gran).read_text())
+    metrics = {t: json.loads(find_metrics_file(root(method, gran), name, None, t, method=method, granularity=gran).read_text())
                for t in TASKS}
     out = {"baseline": zero(()), "cells": {}}
     for K, by_k in metrics["ioi"]["by_k"].items():
@@ -126,6 +135,8 @@ def main():
     parser.add_argument("--selective-results", default="results/cross_task")
     args = parser.parse_args()
     model = load_model(args.model)
+    if args.granularity == "feature":
+        attach_saes(model, SAESpec())
     slug = args.model.replace("/", "_")
     if args.mode == "selective":
         res, path = selective(model, args.model, Path(args.selective_results)), OUT / "reeval_ioi" / f"selective__{slug}.json"
