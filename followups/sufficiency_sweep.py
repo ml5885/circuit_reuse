@@ -9,6 +9,7 @@ nothing kept this gives faithfulness curves over circuit size, as in MIB and Aro
 import argparse
 import json
 import random
+from pathlib import Path
 
 from circuit_reuse.evaluate import _build_mean_ablation_hooks, compute_corrupted_means, evaluate_graded, summarize_graded
 from cross_task_experiment import find_metrics_file, parse_component_str
@@ -24,14 +25,16 @@ def main():
     parser.add_argument("--granularity", default="head_mlp")
     parser.add_argument("--method", default="eap_ig")
     parser.add_argument("--K", default="10")
+    parser.add_argument("--results-dir", default=None, help="extraction root (default: the paper's)")
+    parser.add_argument("--output-dir", default=str(OUT / "sufficiency_sweep"))
     args = parser.parse_args()
     model = load_model(args.model)
     datasets = eval_datasets(args.model)
     units = all_units(model, args.granularity)
     kinds = ("neuron",) if args.granularity == "neuron" else ("head", "mlp")
     rng = random.Random(0)
-    root = EXTRACT / f"granularity_parity_{args.method}_{args.granularity}"
-    path = OUT / "sufficiency_sweep" / f"{args.model.replace('/', '_')}__{args.method}_{args.granularity}.json"
+    root = Path(args.results_dir or EXTRACT) / f"granularity_parity_{args.method}_{args.granularity}"
+    path = Path(args.output_dir) / f"{args.model.replace('/', '_')}__{args.method}_{args.granularity}.json"
     results = {}
     for task in TASKS:
         ds = datasets[task]
