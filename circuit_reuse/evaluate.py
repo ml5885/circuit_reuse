@@ -212,39 +212,10 @@ def evaluate_accuracy_with_mean_ablation(
     means: Dict[str, "torch.Tensor"],
     verbose: bool = False,
 ) -> Tuple[int, int]:
-    """Same evaluation loop as evaluate_accuracy_with_ablation, but ablation
-    replaces each removed component's activation with its pre-computed
-    corrupted-distribution mean rather than zero."""
-    model.eval()
-    hooks = _build_mean_ablation_hooks(removed, means)
-
-    correct, total = 0, 0
-    device = model.cfg.device
-    with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
-        for ex in dataset:
-            logits = model(model.to_tokens(ex.prompt, prepend_bos=True).to(device))
-            logits_last = logits[0, -1]
-
-            if task == "boolean":
-                pred_label, _ = _classify_boolean(logits_last, model, verbose=verbose)
-                if pred_label == ex.target:
-                    correct += 1
-            elif task == "ioi":
-                labels = ex.labels or [ex.target, ex.corrupted_target]
-                pred_idx = _classify_ioi(logits_last, model, labels)
-                gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
-                if pred_idx == gold_idx:
-                    correct += 1
-            elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
-                labels = ex.labels or ["A", "B", "C", "D"]
-                pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == ex.target.strip():
-                    correct += 1
-            else:
-                if _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose):
-                    correct += 1
-            total += 1
-    return correct, total
+    """Same as evaluate_accuracy_with_ablation, but each removed component's activation is
+    replaced with its pre-computed corrupted-distribution mean rather than zero."""
+    rows = _predict(model, dataset, task, _build_mean_ablation_hooks(removed, means), verbose)
+    return sum(r["is_correct"] for r in rows), len(rows)
 
 
 def _extract_gold_ids(model: Any, prompt: str, target: str, device, verbose: bool = False) -> List[int]:
@@ -376,79 +347,77 @@ def _classify_ioi(logits_last, model, names: List[str]) -> int:
     return max(scores, key=lambda x: x[0])[1]
 
 
-def evaluate_accuracy(model: Any, dataset: Iterable[Example], task: str, verbose: bool = False) -> Tuple[int, int]:
+EVAL_TOKENS_PER_BATCH = 8192
+
+
+def _length_batches(model: Any, dataset: List[Example]):
+    """Yield (indices, tokens) for batches of prompts with the same token length, so that a
+    batch needs no padding and each row gets the logits it would get on its own."""
+    by_len: Dict[int, List[Tuple[int, torch.Tensor]]] = defaultdict(list)
+    for i, ex in enumerate(dataset):
+        tok = model.to_tokens(ex.prompt, prepend_bos=True)[0]
+        by_len[len(tok)].append((i, tok))
+    for length, items in by_len.items():
+        size = max(1, EVAL_TOKENS_PER_BATCH // length)
+        for b in range(0, len(items), size):
+            chunk = items[b:b + size]
+            yield [i for i, _ in chunk], torch.stack([t for _, t in chunk]).to(model.cfg.device)
+
+
+def _greedy_batch(model: Any, tokens: torch.Tensor, first: torch.Tensor, steps: int) -> torch.Tensor:
+    """Greedy continuation of equal-length prompts; ``first`` is the argmax at the last prompt
+    position. Returns (batch, steps) generated ids."""
+    generated = [first]
+    for _ in range(steps - 1):
+        tokens = torch.cat([tokens, generated[-1][:, None]], dim=1)
+        generated.append(model(tokens)[:, -1].argmax(-1))
+    return torch.stack(generated, dim=1)
+
+
+def _predict(model: Any, dataset: Iterable[Example], task: str, hooks=(), verbose: bool = False) -> List[Dict[str, Any]]:
+    """Per-example predictions of the model under ``hooks``:
+    {"prompt", "target", "pred", "is_correct"} (no "pred" for addition)."""
     model.eval()
-    correct, total = 0, 0
-    device = model.cfg.device
-    with torch.inference_mode():
-        for ex in dataset:
-            prompt, target = ex.prompt, ex.target
-            logits = model(model.to_tokens(prompt, prepend_bos=True).to(device))
-            logits_last = logits[0, -1]
+    dataset = list(dataset)
+    rows: List[Dict[str, Any]] = [None] * len(dataset)
+    ctx = model.hooks(fwd_hooks=list(hooks)) if hooks else nullcontext()
+    with ctx, torch.inference_mode():
+        for idx, tokens in _length_batches(model, dataset):
+            logits_last = model(tokens)[:, -1]
+            if task not in ("boolean", "ioi", "mmlu", "mcqa", "arc_easy", "arc_challenge"):  # addition
+                gold = [_extract_gold_ids(model, dataset[i].prompt, dataset[i].target, tokens.device, verbose) for i in idx]
+                steps = max(1, max(len(g) for g in gold))
+                gen = _greedy_batch(model, tokens, logits_last.argmax(-1), steps).tolist()
+                for r, i in enumerate(idx):
+                    ok = bool(gold[r]) and gen[r][:len(gold[r])] == gold[r]
+                    rows[i] = {"prompt": dataset[i].prompt, "target": dataset[i].target, "is_correct": ok}
+                continue
+            for r, i in enumerate(idx):
+                ex, logits = dataset[i], logits_last[r]
+                if task == "boolean":
+                    pred, _ = _classify_boolean(logits, model, verbose=verbose)
+                    gold = ex.target
+                elif task == "ioi":
+                    labels = ex.labels or [ex.target, ex.corrupted_target]
+                    pred = labels[_classify_ioi(logits, model, labels)]
+                    gold = labels[ex.answer_idx if ex.answer_idx is not None else 0]
+                else:
+                    pred = _classify_from_labels(logits, model, ex.labels or ["A", "B", "C", "D"])
+                    gold = ex.target.strip()
+                rows[i] = {"prompt": ex.prompt, "target": gold, "pred": pred, "is_correct": pred == gold}
+    return rows
 
-            if task == "boolean":
-                pred_label, _ = _classify_boolean(logits_last, model, verbose=verbose)
-                if pred_label == target:
-                    correct += 1
 
-            elif task == "ioi":
-                labels = ex.labels or [ex.target, ex.corrupted_target]
-                pred_idx = _classify_ioi(logits_last, model, labels)
-                gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
-                if pred_idx == gold_idx:
-                    correct += 1
-
-            elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
-                labels = ex.labels or ["A", "B", "C", "D"]
-                pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == target.strip():
-                    correct += 1
-
-            else:
-                if _check_addition_correct(model, prompt, target, device, logits_last, verbose=verbose):
-                    correct += 1
-
-            total += 1
-    return correct, total
+def evaluate_accuracy(model: Any, dataset: Iterable[Example], task: str, verbose: bool = False) -> Tuple[int, int]:
+    rows = _predict(model, dataset, task, verbose=verbose)
+    return sum(r["is_correct"] for r in rows), len(rows)
 
 
 def evaluate_accuracy_with_ablation(
     model: Any, dataset: Iterable[Example], task: str, removed: Iterable[Component], verbose: bool = False
 ) -> Tuple[int, int]:
-    model.eval()
-    hooks = _build_ablation_hooks(removed)
-
-    correct, total = 0, 0
-    device = model.cfg.device
-    with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
-        for ex in dataset:
-            logits = model(model.to_tokens(ex.prompt, prepend_bos=True).to(device))
-            logits_last = logits[0, -1]
-
-            if task == "boolean":
-                pred_label, _ = _classify_boolean(logits_last, model, verbose=verbose)
-                if pred_label == ex.target:
-                    correct += 1
-
-            elif task == "ioi":
-                labels = ex.labels or [ex.target, ex.corrupted_target]
-                pred_idx = _classify_ioi(logits_last, model, labels)
-                gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
-                if pred_idx == gold_idx:
-                    correct += 1
-
-            elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
-                labels = ex.labels or ["A", "B", "C", "D"]
-                pred_label = _classify_from_labels(logits_last, model, labels)
-                if pred_label == ex.target.strip():
-                    correct += 1
-
-            else:
-                if _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose):
-                    correct += 1
-
-            total += 1
-    return correct, total
+    rows = _predict(model, dataset, task, _build_ablation_hooks(removed), verbose)
+    return sum(r["is_correct"] for r in rows), len(rows)
 
 
 def evaluate_predictions(
@@ -458,57 +427,10 @@ def evaluate_predictions(
     removed: Iterable[Component] | None = None,
     verbose: bool = False,
 ) -> Tuple[int, int, List[Dict[str, Any]]]:
-    """
-    Evaluate and also return per-example predictions.
-
-    Returns:
-      correct, total, per_example list with:
-        {"prompt": str, "target": str, "pred": str | int, "is_correct": bool}
-    """
-    model.eval()
-    hooks = _build_ablation_hooks(removed) if removed else []
-
-    per_ex: List[Dict[str, Any]] = []
-    correct, total = 0, 0
-    device = model.cfg.device
-    ctx = model.hooks(fwd_hooks=hooks) if hooks else nullcontext()
-
-    with ctx:
-        with torch.inference_mode():
-            for ex in dataset:
-                logits = model(model.to_tokens(ex.prompt, prepend_bos=True).to(device))
-                logits_last = logits[0, -1]
-
-                if task == "boolean":
-                    pred_label, _ = _classify_boolean(logits_last, model, verbose=verbose)
-                    gold = ex.target
-                    ok = (pred_label == gold)
-                    per_ex.append({"prompt": ex.prompt, "target": gold, "pred": pred_label, "is_correct": bool(ok)})
-
-                elif task == "ioi":
-                    labels = ex.labels or [ex.target, ex.corrupted_target]
-                    pred_idx = _classify_ioi(logits_last, model, labels)
-                    gold_idx = ex.answer_idx if ex.answer_idx is not None else 0
-                    ok = (pred_idx == gold_idx)
-                    pred_name = labels[pred_idx] if 0 <= pred_idx < len(labels) else str(pred_idx)
-                    gold_name = labels[gold_idx] if 0 <= gold_idx < len(labels) else str(gold_idx)
-                    per_ex.append({"prompt": ex.prompt, "target": gold_name, "pred": pred_name, "is_correct": bool(ok)})
-
-                elif task in ("mmlu", "mcqa", "arc_easy", "arc_challenge"):
-                    labels = ex.labels or ["A", "B", "C", "D"]
-                    pred_label = _classify_from_labels(logits_last, model, labels)
-                    gold = ex.target.strip()
-                    ok = (pred_label == gold)
-                    per_ex.append({"prompt": ex.prompt, "target": gold, "pred": pred_label, "is_correct": bool(ok)})
-
-                else:
-                    ok = _check_addition_correct(model, ex.prompt, ex.target, device, logits_last, verbose=verbose)
-                    per_ex.append({"prompt": ex.prompt, "target": ex.target, "is_correct": bool(ok)})
-
-                correct += int(per_ex[-1]["is_correct"])
-                total += 1
-
-    return correct, total, per_ex
+    """Evaluate and also return per-example predictions
+    ({"prompt", "target", "pred", "is_correct"})."""
+    rows = _predict(model, dataset, task, _build_ablation_hooks(removed) if removed else (), verbose)
+    return sum(r["is_correct"] for r in rows), len(rows), rows
 
 
 __all__ = [
