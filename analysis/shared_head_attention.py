@@ -284,6 +284,7 @@ def plot_summary(summary: dict):
         ax.set_yticklabels([])
     fig.colorbar(im, ax=axes, shrink=0.7, label="Mean attention weight")
     plt.savefig(OUT_DIR / "summary_combined.png", dpi=150, bbox_inches="tight")
+    plt.savefig(OUT_DIR / "summary_combined.pdf", bbox_inches="tight")
     plt.close()
 
 
