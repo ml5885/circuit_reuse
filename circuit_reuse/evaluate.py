@@ -291,7 +291,7 @@ _BOOL_CACHE = {}
 
 
 def _boolean_token_id_groups(model) -> Tuple[set, set]:
-    cache_key = model.cfg.model_name
+    cache_key = model.tokenizer.name_or_path  # the token ids depend only on the tokenizer
     if cache_key in _BOOL_CACHE:
         return _BOOL_CACHE[cache_key]
     variants_true = [" true", "true", " True", "True"]
