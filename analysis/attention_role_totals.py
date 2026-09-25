@@ -6,7 +6,7 @@ or summed. This computes the total attention a head sends from the final query
 position to all tokens of a role, which is the quantity the case study needs, and
 does it for every head so the three shared heads have a baseline.
 
-Run: python -m analysis.attention_role_totals
+Run: python -m analysis.attention_role_totals --heads L4H10,L9H21,L15H18
 """
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ from analysis.shared_head_attention import (MODEL_NAME, N_PER_TASK, classify_tok
                                             device, load_examples)
 
 TASKS = ["addition", "boolean", "ioi", "mcqa", "arc_easy", "arc_challenge"]
-SHARED = [(8, 17), (9, 21), (13, 12)]
 # The role a head would have to read to do the task, as opposed to prompt
 # scaffolding. IOI needs the names, Addition the digits, the MCQA-style tasks the
 # answer labels, Boolean the literals.
@@ -42,6 +41,12 @@ OUT = Path("results2/attention_sink")
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--heads", default="L4H10,L9H21,L15H18",
+                        help="the heads shared by every task circuit (EAP-IG, K=10%%, P=50%%)")
+    args = parser.parse_args()
+    shared = [tuple(int(x) for x in h[1:].split("H")) for h in args.heads.split(",")]
     dev = device()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForCausalLM.from_pretrained(
@@ -89,8 +94,16 @@ def main():
                     for t in TASKS], axis=0)
     bf = body.ravel()
     print(f"all heads: median {np.median(bf):.3f}, 90th pct {np.percentile(bf, 90):.3f}")
-    for L, H in SHARED:
+    for L, H in shared:
         print(f"  L{L}H{H}: {body[L, H]:.3f} ({(bf < body[L, H]).mean() * 100:.1f}th pct)")
+
+    print("\n=== total attention to BOS, the prompt body and the final token (mean over tasks) ===")
+    for L, H in shared:
+        bos = np.mean([totals[t]["BOS"][L, H] for t in TASKS])
+        final = np.mean([totals[t]["FINAL"][L, H] for t in TASKS])
+        sink = np.mean([totals[t]["BOS"] for t in TASKS], axis=0).ravel()
+        print(f"  L{L}H{H}: BOS {bos:.3f} ({(sink < bos).mean() * 100:.0f}th pct of heads), body {body[L, H]:.3f}, "
+              f"final {final:.3f}, BOS/body {bos / body[L, H]:.1f}")
 
     print("\n=== total attention to the task-critical role, per task ===")
     for task in TASKS:
@@ -101,7 +114,7 @@ def main():
         m = totals[task][role]
         mf = m.ravel()
         line = ", ".join(f"L{L}H{H} {m[L, H]:.3f} ({(mf < m[L, H]).mean() * 100:.0f}th)"
-                         for L, H in SHARED)
+                         for L, H in shared)
         print(f"  [{task}] {role}: all-head median {np.median(mf):.3f} | {line}")
 
 
