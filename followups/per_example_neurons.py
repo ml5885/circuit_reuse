@@ -62,7 +62,7 @@ def main():
                 else:
                     counts["own top-10%"] += evaluate_accuracy_with_ablation(model, [ex], task=task, removed=own)[0]
                     counts["random, same per layer"] += evaluate_accuracy_with_ablation(model, [ex], task=task, removed=rand)[0]
-            out[f"{name}|{task}"] = {k: v / args.n for k, v in counts.items()}
+            out[f"{name}|{task}"] = {k: v / len(examples[: args.n]) for k, v in counts.items()}
             print(name, task, out[f"{name}|{task}"], flush=True)
         del model
     Path(args.output or f"results/rerun/per_example_neurons_{args.mode}.json").write_text(json.dumps(out, indent=2))
