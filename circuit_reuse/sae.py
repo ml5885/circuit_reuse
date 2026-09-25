@@ -146,12 +146,15 @@ class CLTLayer(nn.Module):
 
     def read(self, x: torch.Tensor) -> torch.Tensor:
         """Encode, pass the activations through the hook point, and keep the change the hooks
-        made (zero with a gradient path when the extractor scores the features)."""
+        made (zero with a gradient path when the extractor scores the features). Ablation hooks
+        edit the activations in place, so the clean values are copied first."""
         acts = self.encode(x.detach())
+        hooked = bool(self.hook_sae_acts_post.fwd_hooks)
+        clean = acts.clone() if hooked else acts.detach()
         if torch.is_grad_enabled():
             acts.requires_grad_(True)
         post = self.hook_sae_acts_post(acts)
-        self.delta = None if post is acts and not torch.is_grad_enabled() else post - acts.detach()
+        self.delta = post - clean if hooked or torch.is_grad_enabled() else None
         return x
 
 
