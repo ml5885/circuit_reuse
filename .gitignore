@@ -47,14 +47,15 @@ htmlcov/
 
 data/
 results*/
-cache/
+cache*/
+logs/
 scratch/
 
 OVERVIEW.md
 
 scripts/
 reference_code/
-tests/
+analysis/
 docs/
 paper*/
 new_plots/
