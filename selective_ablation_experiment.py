@@ -1,4 +1,4 @@
-"""Selective ablation experiment: shared core vs. task residuals.
+r"""Selective ablation experiment: shared core vs. task residuals.
 
 For a pair of tasks (A, B), decomposes task A's circuit into:
   G_AB = C_A ∩ C_B   (shared core)

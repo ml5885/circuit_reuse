@@ -2,8 +2,8 @@
 
 Ports the four propagation rules from the RelP paper (Jafari et al. 2025,
 https://arxiv.org/abs/2508.21258) onto our installed TransformerLens by
-class-level monkey-patching. Matches the semantics of the RelP fork
-(reference_code/RelP/TransformerLens) without forking the dependency.
+class-level monkey-patching. Matches the semantics of the RelP fork of
+TransformerLens (https://github.com/FarnoushRJ/RelP) without forking the dependency.
 
 Rules (all four are on by default, which is the configuration of Arora et al.
 2026, arXiv:2601.22594, and the RelP repository default plus the AH-rule):
@@ -19,7 +19,7 @@ Rules (all four are on by default, which is the configuration of Arora et al.
   multiply in gated MLPs passes half the gradient to each branch (Shapley).
 
 With all four, gradient x activation relevance is conserved through every
-linearized operation (analysis/relp_conservation_check.py). Results before
+linearized operation. Results before
 2026-09-21 used LEGACY_LRP_RULES, which omitted the Identity-rule.
 """
 from __future__ import annotations

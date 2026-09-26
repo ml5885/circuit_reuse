@@ -1,4 +1,4 @@
-"""Shared helpers for the reviewer follow-up runs."""
+"""Shared helpers for the follow-up experiments."""
 from __future__ import annotations
 
 import json
@@ -37,7 +37,7 @@ def train_examples(task: str, model_name: str, seed: int = 42, num_examples: int
 def eval_datasets(model_name: str, seed: int = 42, num_examples: int = 100,
                   order: str = "addition,arc_challenge,arc_easy,boolean,ioi,mcqa"):
     """The evaluation examples of the cross-task runs: one seed, then each task drawn
-    in the order the pod scripts pass them, so the generated tasks match exactly."""
+    in their --tasks order, so the generated tasks match exactly."""
     random.seed(seed)
     torch.manual_seed(seed)
     out = {}

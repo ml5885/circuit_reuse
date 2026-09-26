@@ -8,7 +8,7 @@ packages = ["circuit_reuse"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = ["reference_code", ".venv", "results", "results2", "cache"]
+norecursedirs = ["reference_code", ".venv", "results*", "cache*"]
 
 [build-system]
 requires = ["setuptools"]

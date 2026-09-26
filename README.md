@@ -32,8 +32,9 @@ huggingface-cli login   # gemma-2 and llama-3.2 are gated
 | `circuit_reuse/evaluate.py` | Accuracy evaluation under zero and mean ablation. |
 | `circuit_reuse/dataset.py` | Tasks and counterfactuals. |
 | `models/olmo_adapter.py` | `load_model_any`, which loads through TransformerLens and falls back to a hooked HF wrapper for OLMo checkpoints. |
-| `analysis/` | Aggregation scripts and figure generators. |
-| `scripts/`, `paper2/`, `results*/`, `cache*/` | SLURM and pod scripts, paper source, outputs, and attribution caches. Not tracked. |
+| `followups/` | Follow-up experiments on the extracted circuits: sufficiency, SAE error terms, batched selective ablation, and a preflight check of the attribution metric on the real models. Run as modules, e.g. `python -m followups.preflight`. |
+| `tests/` | Task input and scoring checks, and the cross-layer transcoder splice. Run with `pytest`. |
+| `results*/`, `cache*/` | Outputs and attribution caches. Not tracked. |
 
 ## Tasks
 
@@ -111,27 +112,6 @@ python cross_task_experiment.py \
 
 Two definitions change at this granularity. Only features whose activation differs between the clean and corrupted input receive a score, so top-K is K% of those features rather than of all latents, and per-example circuits vary in size (`avg_circuit_size` and `scored_components_per_example` are recorded). The control circuit is sampled from the features attributed on at least one training example, since a random draw from all latents would be inactive on the task and ablate nothing.
 
-### 3. Aggregation and figures
-
-```bash
-python -m analysis.granularity_parity --results-root results/granularity_parity \
-    --output-dir results/granularity_parity_analysis --plots
-```
-
-This reads every `metrics.json` and cross-task JSON under `--results-root` and writes the tidy CSVs (`extraction_tidy.csv`, `cross_task_tidy.csv`, `overlap_pairs.csv`, `bootstrap_summary.csv`, `circuit_composition.csv`) and summary figures. The scripts below read those CSVs:
-
-| Script | Output |
-|---|---|
-| `analysis/paper_candidates.py` | The paper's figures, written to `paper2/candidates/`; `sync_paper()` copies the chosen ones into the paper's `figures/`. |
-| `analysis/paper2_figures.py` | Alternative renderings of each main-text claim. |
-| `analysis/appendix_tables.py --method M --granularity G` | Appendix LaTeX tables. |
-| `analysis/review_plots.py [A1 ...]` | The analyses requested by the reviews that need no GPU. Writes `paper2/review_plots.md`. |
-| `analysis/pat_confound_checks.py` | Score-rule and top-K confound checks computed from the per-example caches. |
-| `analysis/zero_vs_mean_ablation_report.py [--config M_G --K 10 --P 50]` | Zero-vs-mean robustness figures and statistics; `--config` selects a granularity-parity configuration. |
-| `analysis/zero_vs_mean_ablation.py`, `analysis/selective_ablation_summary.py` | Summaries of the original mean-ablation and selective-ablation experiments. |
-
-The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) predate the tidy CSVs and read `metrics.json` files directly.
-
 ## `main_experiment.py` arguments
 
 | Argument | Meaning |
@@ -146,7 +126,7 @@ The older scripts in `analysis/` (`plot_k_sweep.py`, `multiplot_*.py`, ...) pred
 | `--task-metric` | Attribution objective: `logprob`, the summed log-probability of the gold tokens (default), or `kl`. |
 | `--ignore-type` | Sample the control without matching component types. |
 | `--score-threshold` | Select components with `\|score\| ≥ τ Σ\|scores\|` instead of the top-K%. Results are stored under `by_threshold`. |
-| `--use-lrp` / `--no-use-lrp`, `--lrp-rules` | Enable or disable the LRP backward rules for `relp`, and choose them (default `LN-rule,AH-rule,Half-rule`). |
+| `--use-lrp` / `--no-use-lrp`, `--lrp-rules` | Enable or disable the LRP backward rules for `relp`, and choose them (default `LN-rule,Identity-rule,AH-rule,Half-rule`). |
 
 ## Attribution methods
 
@@ -164,6 +144,6 @@ This project builds on:
 
 - [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens) — hook-based mechanistic-interpretability library; all forward passes and component hooks are TL primitives.
 - [eap-ig](https://github.com/hannamw/eap-ig) — our `eap` and `eap_ig` edge-graph paths (`circuit_reuse/graph.py`) are derived from this implementation of Edge Attribution Patching (Syed et al. 2023, [arXiv:2310.10348](https://arxiv.org/abs/2310.10348)).
-- [RelP (Jafari et al. 2025)](https://arxiv.org/abs/2508.21258) — the `relp` method and the LRP rules in `circuit_reuse/lrp_patch.py` are ported from the authors' TransformerLens fork at [FarnoushRJ/RelP](https://github.com/FarnoushRJ/RelP) (see `reference_code/RelP/`).
-- [ADAG / Arora et al. 2026](https://arxiv.org/abs/2601.22594) — "Language Model Circuits Are Sparse in the Neuron Basis." `--method relp --granularity neuron` reproduces their MLP-neuron-basis circuit scoring. The `reference_code/circuits/` directory vendors the ADAG library (Transluce) for comparison.
-- LRP propagation rules: LN-rule (Ali et al. 2022), AH-rule (Ali et al. 2022), Half-rule (Arras et al. 2019; Jafari et al. 2024).
+- [RelP (Jafari et al. 2025)](https://arxiv.org/abs/2508.21258) — the `relp` method and the LRP rules in `circuit_reuse/lrp_patch.py` are ported from the authors' TransformerLens fork at [FarnoushRJ/RelP](https://github.com/FarnoushRJ/RelP).
+- [ADAG / Arora et al. 2026](https://arxiv.org/abs/2601.22594) — "Language Model Circuits Are Sparse in the Neuron Basis." `--method relp --granularity neuron` reproduces their MLP-neuron-basis circuit scoring.
+- LRP propagation rules: LN-rule (Ali et al. 2022), Identity-rule (Jafari et al. 2024), AH-rule (Ali et al. 2022), Half-rule (Arras et al. 2019; Jafari et al. 2024).
