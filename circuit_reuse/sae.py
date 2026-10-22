@@ -22,7 +22,10 @@ al. 2025) is spliced the same way with ``--sae-kind clt``: layer L's features re
 every later layer. Each MLP output becomes ``mlp_out + sum_L (acts_L - acts_L.clean) W_dec``,
 so the unablated forward pass is unchanged, ablating a feature removes its decoded
 contribution from every downstream MLP output, and the MLPs themselves play the role of the
-error term. Layer L's feature activations sit at the same hook point as an SAE's.
+error term. Layer L's feature activations sit at the same hook point as an SAE's. Its error term,
+the MLP output minus the CLT's reconstruction from the clean features, is computed only when a hook
+is attached to ``blocks.{L}.sae.hook_sae_error`` (the same name as an SAE's); the MLP output then
+becomes reconstruction plus the hooked error term, which equals it when the hook leaves the term alone.
 
     python -m circuit_reuse.sae --model google/gemma-2-2b   # reconstruction check
     python -m circuit_reuse.sae --model google/gemma-2-2b --sae-kind clt --sae-release mntss/clt-gemma-2-2b-426k
@@ -131,7 +134,9 @@ class CLTLayer(nn.Module):
         self.b_dec = nn.Parameter(b_dec, requires_grad=False)
         self.path = path
         self.delta = None
+        self.clean = None
         self.hook_sae_acts_post = HookPoint()
+        self.hook_sae_error = HookPoint()
 
     @property
     def d_sae(self) -> int:
@@ -155,6 +160,7 @@ class CLTLayer(nn.Module):
             acts.requires_grad_(True)
         post = self.hook_sae_acts_post(acts)
         self.delta = post - clean if hooked or torch.is_grad_enabled() else None
+        self.clean = clean
         return x
 
 
@@ -169,15 +175,20 @@ def load_clt(release: str, n_layers: int, device: str, dtype=torch.bfloat16) -> 
     return layers
 
 
-def attach_clt(model, spec: SAESpec) -> Dict[int, CLTLayer]:
+def attach_clt(model, spec: SAESpec, layers: Optional[Dict[int, CLTLayer]] = None) -> Dict[int, CLTLayer]:
     """Splice a CLT: encode at ``hook_resid_mid``, add the hooks' changes to the features,
     decoded, to ``hook_mlp_out`` of every layer at or after the features' own."""
-    layers = load_clt(spec.release, model.cfg.n_layers, model.cfg.device, getattr(torch, spec.dtype))
+    if layers is None:
+        layers = load_clt(spec.release, model.cfg.n_layers, model.cfg.device, getattr(torch, spec.dtype))
     for layer, clt in layers.items():
         model.blocks[layer].add_module("sae", clt)
         model.add_hook(f"blocks.{layer}.hook_resid_mid", lambda x, hook, clt=clt: clt.read(x), is_permanent=True)
 
         def write(y, hook=None, target=layer):
+            if layers[target].hook_sae_error.fwd_hooks:
+                recon = sum(layers[l].clean.to(layers[l].W_dec.dtype) @ layers[l].decoder_to(target)
+                            for l in range(target + 1)).float() + layers[target].b_dec.float()
+                y = (recon + layers[target].hook_sae_error(y.float() - recon)).to(y.dtype)
             deltas = [(src, src.delta) for src in (layers[l] for l in range(target + 1)) if src.delta is not None]
             if not deltas:
                 return y

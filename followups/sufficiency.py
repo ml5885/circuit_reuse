@@ -14,19 +14,22 @@ from collections import Counter
 
 from circuit_reuse.circuit_extraction import Component
 from circuit_reuse.evaluate import _build_mean_ablation_hooks, compute_corrupted_means, evaluate_graded, summarize_graded
+from circuit_reuse.sae import attached_sae_layers
 from followups.common import OUT, TASKS, circuit, eval_datasets, load_model, write_json
 
 
 def all_units(model, granularity: str) -> list[Component]:
     L, H, d_mlp = model.cfg.n_layers, model.cfg.n_heads, model.cfg.d_mlp
+    if granularity == "feature":
+        return [Component(l, "feature", i) for l in attached_sae_layers(model) for i in range(model.blocks[l].sae.d_sae)]
     if granularity == "neuron":
         return [Component(l, "neuron", i) for l in range(L) for i in range(d_mlp)]
     return [Component(l, "head", h) for l in range(L) for h in range(H)] + [Component(l, "mlp", 0) for l in range(L)]
 
 
 def matched_random(units: list[Component], kept: list[Component], rng: random.Random) -> set[Component]:
-    """A random set with the same number of units of each kind (and, for neurons, per layer)."""
-    key = (lambda c: (c.kind, c.layer)) if kept and kept[0].kind == "neuron" else (lambda c: c.kind)
+    """A random set with the same number of units of each kind (and, for neurons and features, per layer)."""
+    key = (lambda c: (c.kind, c.layer)) if kept and kept[0].kind in ("neuron", "feature") else (lambda c: c.kind)
     pools: dict = {}
     for u in units:
         pools.setdefault(key(u), []).append(u)

@@ -5,11 +5,11 @@ from typing import Iterable, List, Tuple, Any, Dict, Optional
 import torch
 from .dataset import Example
 from .circuit_extraction import Component
-from .sae import FEATURE_HOOK, attached_sae_layers
+from .sae import ERROR_HOOK, FEATURE_HOOK, attached_sae_layers
 from contextlib import contextmanager, nullcontext
 
 
-KIND_KEYS = {"head": "z", "mlp": "mlp_out", "neuron": "neuron_post", "feature": "sae_acts"}
+KIND_KEYS = {"head": "z", "mlp": "mlp_out", "neuron": "neuron_post", "feature": "sae_acts", "error": "sae_error"}
 
 
 def _build_ablation_hooks(removed: Iterable[Component]) -> List[Tuple[str, callable]]:
@@ -74,13 +74,15 @@ def compute_corrupted_means(
     layers: Optional[Iterable[int]] = None,
     per_position: bool = False,
     kinds: Optional[Iterable[str]] = None,
+    align: str = "start",
 ) -> Dict[str, "torch.Tensor"]:
     """Mean activations of heads, MLP outputs and MLP neurons over the corrupted
     prompts of ``dataset`` (Wang et al. 2022, Miller et al. 2024).
 
     Keys are ``z_L{layer}`` (n_heads, d_head), ``mlp_out_L{layer}`` (d_model,),
-    ``neuron_post_L{layer}`` (d_mlp,) and, for layers with an attached SAE,
-    ``sae_acts_L{layer}`` (d_sae,). ``kinds`` restricts the cache to the component
+    ``neuron_post_L{layer}`` (d_mlp,) and, for layers with an attached SAE or CLT,
+    ``sae_acts_L{layer}`` (d_sae,) and, only when ``kinds`` names ``"error"``, the
+    error term ``sae_error_L{layer}`` (d_model,). ``kinds`` restricts the cache to the component
     kinds that will be ablated, which matters at neuron and feature granularity
     where the unused caches are the large ones. With ``per_position`` every tensor gains a
     leading position axis, holding the mean at each token position over the
@@ -88,6 +90,11 @@ def compute_corrupted_means(
     means for positions beyond the longest reference prompt. A pooled mean written
     into every position is off-distribution for neurons that fire only at one
     position, such as the massive-activation neurons at the first token.
+
+    ``align`` sets which positions are averaged together when prompts differ in length:
+    ``"start"`` counts positions from the first token, ``"end"`` keeps the first (BOS) token
+    and counts every other position from the last token, so the last token of each prompt is
+    averaged with the last tokens of the others. ``means["_align"]`` records the choice.
     """
     layer_set = set(range(model.cfg.n_layers) if layers is None else (int(l) for l in layers))
     wanted = None if kinds is None else {KIND_KEYS[k] for k in kinds}
@@ -100,6 +107,8 @@ def compute_corrupted_means(
     def make_hook(key):
         def hook(act, hook=None):
             a = act.detach().float()  # (batch, pos, ...)
+            if align == "end":  # index 0 is the BOS token, index j >= 1 the j-th token from the end
+                a = torch.cat([a[:, :1], a[:, 1:].flip(1)], dim=1)
             n = a.shape[1]
             if key not in sums:
                 sums[key] = torch.zeros((0,) + a.shape[2:], device=a.device)
@@ -118,6 +127,9 @@ def compute_corrupted_means(
     if wanted is None or "sae_acts" in wanted:
         hooks += [(FEATURE_HOOK.format(layer=layer), make_hook(f"sae_acts_L{layer}"))
                   for layer in attached_sae_layers(model) if layer in layer_set]
+    if wanted is not None and "sae_error" in wanted:
+        hooks += [(ERROR_HOOK.format(layer=layer), make_hook(f"sae_error_L{layer}"))
+                  for layer in attached_sae_layers(model) if layer in layer_set]
     model.eval()
     with torch.inference_mode(), model.hooks(fwd_hooks=hooks):
         for ex in dataset:
@@ -132,21 +144,27 @@ def compute_corrupted_means(
         means[key] = total / c.clamp(min=1).view(shape) if per_position else pooled[key]
     if per_position:
         means["_pooled"] = pooled
+        means["_align"] = align
     return means
 
 
 def _select_mean(means: Dict[str, "torch.Tensor"], key: str, positions: int) -> "torch.Tensor":
     """The cached mean for ``key`` with a leading axis of length ``positions``:
-    the per-position means where the reference prompts reach, the pooled mean beyond."""
+    the per-position means where the reference prompts reach, the pooled mean beyond, in the
+    alignment the means were cached with."""
     mean = means.get(key)
     if mean is None:
         raise KeyError(f"No mean cached for {key}")
     if "_pooled" not in means:
         return mean.unsqueeze(0).expand(positions, *mean.shape)
     if positions <= mean.shape[0]:
-        return mean[:positions]
-    tail = means["_pooled"][key].unsqueeze(0).expand(positions - mean.shape[0], *mean.shape[1:])
-    return torch.cat([mean, tail])
+        mean = mean[:positions]
+    else:
+        tail = means["_pooled"][key].unsqueeze(0).expand(positions - mean.shape[0], *mean.shape[1:])
+        mean = torch.cat([mean, tail])
+    if means.get("_align") == "end":
+        mean = torch.cat([mean[:1], mean[1:].flip(0)])
+    return mean
 
 
 def _build_mean_ablation_hooks(
@@ -159,6 +177,7 @@ def _build_mean_ablation_hooks(
     mlp_layers: set = set()
     neurons_by_layer: Dict[int, List[int]] = defaultdict(list)
     features_by_layer: Dict[int, List[int]] = defaultdict(list)
+    error_layers: set = set()
     for comp in removed:
         if comp.kind == "head":
             heads_by_layer[comp.layer].append(comp.index)
@@ -168,8 +187,16 @@ def _build_mean_ablation_hooks(
             neurons_by_layer[comp.layer].append(comp.index)
         elif comp.kind == "feature":
             features_by_layer[comp.layer].append(comp.index)
+        elif comp.kind == "error":
+            error_layers.add(comp.layer)
 
     hooks: List[Tuple[str, callable]] = []
+
+    for layer in error_layers:
+        def hook_error(act, hook=None, key=f"sae_error_L{layer}"):
+            act[:] = _select_mean(means, key, act.shape[1]).to(device=act.device, dtype=act.dtype)[None]
+            return act
+        hooks.append((ERROR_HOOK.format(layer=layer), hook_error))
 
     for layer, indices in heads_by_layer.items():
         idx = torch.tensor(indices)
