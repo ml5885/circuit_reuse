@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Tuple, Iterable
 import random
 import hashlib
 
+import numpy as np
 import torch
 
 from models.olmo_adapter import load_model_any
@@ -131,6 +132,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--node-scores", action="store_true",
                         help="EAP-IG at head_mlp: score each head and MLP block directly instead of summing |edge scores|.")
+    parser.add_argument("--save-edges", action="store_true",
+                        help="EAP/EAP-IG at head_mlp: also save every example's edge-score matrix next to the cache.")
     parser.add_argument("--rank-magnitude", action="store_true",
                         help="Take each example's top-K%% by |score| instead of signed score.")
     parser.add_argument("--necessity-sweeps", type=str, default=None, metavar="K,P",
@@ -388,6 +391,13 @@ def _load_cached_attributions(path: Path) -> List[Dict[Component, float]]:
     return example_scores
 
 
+def _save_edge_scores(path: Path, extractor: CircuitExtractor):
+    """Save the (n_examples, n_forward, n_backward) fp16 edge scores, in cache order, with the row and
+    column names in a JSON file beside them."""
+    np.save(path, torch.stack(extractor.edge_scores).numpy())
+    path.with_suffix(".json").write_text(json.dumps(extractor.graph.index_names()))
+
+
 def _save_attributions_to_cache(path: Path, example_scores: List[Dict[Component, float]]):
     with path.open("w") as f:
         for i, sc in enumerate(example_scores):
@@ -441,6 +451,7 @@ def _run_single_combination(
     node_scores: bool = False,
     rank_magnitude: bool = False,
     necessity_sweeps: tuple[int, int] | None = None,
+    save_edges: bool = False,
 ):
     # Seed random before dataset generation and shuffle for reproducibility
     random.seed(seed)
@@ -483,6 +494,9 @@ def _run_single_combination(
         f"n{num_examples}__d{digits_str}__s{seed}.jsonl"
     )
     attrib_path = cache_dir / attrib_name
+    edges_path = attrib_path.with_suffix(".edges.npy")
+    if save_edges and (method not in ("eap", "eap_ig") or granularity != "head_mlp" or node_scores):
+        raise ValueError("--save-edges needs --method eap or eap_ig at head_mlp, without --node-scores")
 
     combo_key_root = (
         f"{model_name}|{hf_revision or 'none'}|{task}|{method_suffix}|tm{task_metric}|n{num_examples}|d{digits}"
@@ -490,7 +504,7 @@ def _run_single_combination(
     start = end = None
 
     # Decide whether to load from cache or extract anew
-    if not force_extract and attrib_path.exists():
+    if not force_extract and attrib_path.exists() and not (save_edges and not edges_path.exists()):
         # Load cached scores
         try:
             example_scores = _load_cached_attributions(attrib_path)
@@ -531,6 +545,7 @@ def _run_single_combination(
                 lrp_rules=lrp_rules,
                 ig_steps=ig_steps,
                 node_scores=node_scores,
+                keep_edges=save_edges,
             )
             start = time.time()
             try:
@@ -556,6 +571,8 @@ def _run_single_combination(
             end = time.time()
             # Save to cache
             _save_attributions_to_cache(attrib_path, example_scores)
+            if save_edges:
+                _save_edge_scores(edges_path, extractor)
             if debug:
                 print(f"[CACHE] Saved attributions to {attrib_path} (extraction_seconds={end - start:.2f}s)")
 
@@ -586,6 +603,7 @@ def _run_single_combination(
         "task_metric": task_metric,
         "ig_steps": int(ig_steps) if method == "eap_ig" else None,
         "node_scores": node_scores,
+        "edges_path": str(edges_path) if save_edges else None,
         "rank_magnitude": rank_magnitude,
         "necessity_sweeps": necessity_sweeps,
         "lrp_rules": list(lrp_rules or DEFAULT_LRP_RULES) if lrp_active else None,
@@ -593,6 +611,7 @@ def _run_single_combination(
         "reuse_thresholds": list(sorted(set(int(p) for p in reuse_thresholds))),
         "val_fraction": vf,
         "perm_trials": int(perm_trials),
+        "control_sampling": "ignore_type" if ignore_type else ("parity" if parity else "exclude"),
         "extraction_seconds": extraction_seconds,
         "baseline_train_accuracy": baseline_train_acc,
         "baseline_train_correct": baseline_train_correct,
@@ -690,6 +709,9 @@ def _run_single_combination(
             thresh_entry = {
                 "threshold": thr,
                 "shared_circuit_size": shared_size,
+                "control_circuit_size": len(control_removed),
+                "control_overlap": len(set(control_removed) & set(shared)),
+                "control_components": [str(c) for c in sorted(control_removed, key=lambda c: (c.layer, c.kind, c.index))],
                 "avg_circuit_size": avg_circuit_size,
                 "reuse_percent": reuse_percent,
                 "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
@@ -794,6 +816,9 @@ def _run_single_combination(
             thresh_entry = {
                 "threshold": thr,
                 "shared_circuit_size": shared_size,
+                "control_circuit_size": len(control_removed),
+                "control_overlap": len(set(control_removed) & set(shared)),
+                "control_components": [str(c) for c in sorted(control_removed, key=lambda c: (c.layer, c.kind, c.index))],
                 "avg_circuit_size": avg_circuit_size,
                 "reuse_percent": reuse_percent,
                 "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
@@ -916,6 +941,9 @@ def _run_single_combination(
                 "threshold": thr,
                 "shared_circuit_size": shared_size,
                 "avg_circuit_size": take_components,
+                "control_circuit_size": len(control_removed),
+                "control_overlap": len(set(control_removed) & set(shared)),
+                "control_components": [str(c) for c in sorted(control_removed, key=lambda c: (c.layer, c.kind, c.index))],
                 "reuse_percent": reuse_percent,
                 "shared_components": [str(c) for c in sorted(shared, key=lambda c: (c.layer, c.kind, c.index))],
                 "rng_seed": rng_seed,
@@ -1060,6 +1088,7 @@ def main():
             node_scores=args.node_scores,
             rank_magnitude=args.rank_magnitude,
             necessity_sweeps=tuple(_parse_int_list(args.necessity_sweeps)) if args.necessity_sweeps else None,
+            save_edges=args.save_edges,
         )
     except Exception as e:
         print(f"[FATAL] {e}")

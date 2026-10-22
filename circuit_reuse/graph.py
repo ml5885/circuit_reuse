@@ -151,6 +151,27 @@ class Graph:
                 return layer_offset + self.cfg["n_heads"] + self.cfg["n_kv_heads"] + node.kv_head
         raise ValueError(f"Invalid node type or qkv: {type(node)}, {qkv}")
 
+    def index_names(self) -> Dict[str, list]:
+        """Names of the rows (forward nodes) and columns (backward slots) of the score matrix, and the
+        forward indices of the nodes each column feeds: a K/V column feeds every head of its KV group,
+        and the logits column feeds none."""
+        forward = [self.idx_to_forward_node[i].name for i in range(self.n_forward)]
+        backward = [""] * self.n_backward
+        children = [[] for _ in range(self.n_backward)]
+        for node in self.nodes.values():
+            if isinstance(node, AttentionNode):
+                for letter in "qkv":
+                    b = self.backward_index(node, qkv=letter)
+                    backward[b] = f"a{node.layer}.h{node.head}<q" if letter == "q" else f"a{node.layer}.kv{node.kv_head}<{letter}"
+                    children[b].append(self.forward_index(node))
+            elif isinstance(node, MLPNode):
+                b = self.backward_index(node)
+                backward[b] = node.name
+                children[b].append(self.forward_index(node))
+            elif isinstance(node, LogitNode):
+                backward[self.backward_index(node)] = node.name
+        return {"forward": forward, "backward": backward, "backward_children": children}
+
     @classmethod
     def from_model(cls, model: HookedTransformer, granularity: Granularity = "head_mlp") -> "Graph":
         if granularity not in ("head_mlp", "neuron"):
@@ -288,7 +309,7 @@ def attribute_single_example(
     clean_attention_mask: Optional[Tensor] = None,
     corrupted_attention_mask: Optional[Tensor] = None,
 ) -> Tensor:
-    scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=model.cfg.dtype)
+    scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=torch.float32)
     activation_difference.zero_()
 
     fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(
@@ -329,7 +350,7 @@ def attribute_single_example_ig(
     if steps <= 0:
         raise ValueError(f"steps must be positive, got {steps}")
 
-    scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=model.cfg.dtype)
+    scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=torch.float32)
     activation_difference.zero_()
 
     fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(

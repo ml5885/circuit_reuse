@@ -64,8 +64,13 @@ class CircuitExtractor:
         lrp_rules: Optional[Iterable[str]] = None,
         ig_steps: int = 5,
         node_scores: bool = False,
+        keep_edges: bool = False,
     ) -> None:
         self.model = model
+        # With keep_edges, edge-graph extraction also keeps every example's (n_forward, n_backward)
+        # edge-score matrix in `edge_scores`, so any node-level rule can be derived from it later.
+        self.keep_edges = keep_edges
+        self.edge_scores: List[torch.Tensor] = []
         # EAP-IG scores components through their outgoing edges by default; with node_scores
         # it scores each head and MLP block directly, as at neuron granularity and in RelP.
         self.node_scores = node_scores
@@ -522,6 +527,8 @@ class CircuitExtractor:
                 print(f"[OOM] Skipping example {idx} (seq_len too large for available VRAM)")
                 continue
 
+            if self.keep_edges:
+                self.edge_scores.append(scores.half())
             comp_scores = self._scores_to_components(scores)
             per_example_scores.append(comp_scores)
             items = sorted(comp_scores.items(), key=lambda x: x[1], reverse=True)
