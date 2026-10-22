@@ -118,18 +118,19 @@ class EdgePatcher:
         self.in_hooks.append((logits.in_hook, graph.n_forward, [graph.n_backward - 1]))
 
     def _store_hook(self, buf: torch.Tensor, index: int, head: bool):
+        """Writes a node's output into ``buf`` (batch, pos, n_forward, d_model)."""
         def hook(act, hook=None):
             n = act.shape[1]
             if head:
-                buf[:n, index:index + self.n_heads] = act[0]
+                buf[:, :n, index:index + self.n_heads] = act
             else:
-                buf[:n, index] = act[0]
+                buf[:, :n, index] = act
         return hook
 
     @torch.inference_mode()
     def corrupted_outputs(self, tokens: torch.Tensor, attention_mask=None) -> torch.Tensor:
-        """(pos, n_forward, d_model) outputs of every forward node on the corrupted input."""
-        buf = torch.zeros((tokens.shape[1], self.graph.n_forward, self.model.cfg.d_model),
+        """(1, pos, n_forward, d_model) outputs of every forward node on the corrupted input."""
+        buf = torch.zeros((1, tokens.shape[1], self.graph.n_forward, self.model.cfg.d_model),
                           device=self.model.cfg.device, dtype=self.model.cfg.dtype)
         hooks = [(name, self._store_hook(buf, i, head)) for name, i, head in self.out_hooks]
         with self.model.hooks(fwd_hooks=hooks):
@@ -138,42 +139,51 @@ class EdgePatcher:
 
     def _input_hook(self, cur, corr, patch, prev: int, cols: list):
         """Adds, at a node's input, the corrupted-minus-current outputs of the parents whose edge into
-        it is outside the circuit."""
-        mask = patch[:prev, cols]  # (prev, n_cols)
+        it is outside the circuit, for every circuit in the batch."""
+        mask = patch[:, :prev, cols]  # (batch, prev, n_cols)
         is_head = self.head_layer[:prev] >= 0
+
+        def masked(x, m, f):  # sum over parents f of x[..., f, :] * m[:, f, c]
+            return einsum(x[0, :, f], m[:, f], "pos f d, b f c -> b pos c d") if len(x) == 1 \
+                else einsum(x[:, :, f], m[:, f], "b pos f d, b f c -> b pos c d")
 
         def hook(act, hook=None):
             n = act.shape[1]
-            diff = corr[:n, :prev] - cur[:n, :prev]
+            c, k = corr[:, :n, :prev], cur[:, :n, :prev]
             if self.post_norm:
-                update = einsum(diff[:, ~is_head], mask[~is_head], "pos f d, f c -> pos c d")
+                update = masked(c, mask, ~is_head) - masked(k, mask, ~is_head)
                 for layer in self.head_layer[:prev][is_head].unique().tolist():
                     heads = torch.nonzero(self.head_layer[:prev] == layer).flatten()
-                    if not mask[heads].any():
+                    if not mask[:, heads].any():
                         continue
                     block = self.model.blocks[layer]
-                    clean = cur[:n, heads].sum(1) + block.attn.b_O
-                    patched = clean[:, None] + einsum(diff[:, heads], mask[heads], "pos h d, h c -> pos c d")
-                    update = update + block.ln1_post(patched) - block.ln1_post(clean)[:, None]
+                    clean = k[:, :, heads].sum(2) + block.attn.b_O
+                    patched = clean[:, :, None] + masked(c, mask, heads) - masked(k, mask, heads)
+                    update = update + block.ln1_post(patched) - block.ln1_post(clean)[:, :, None]
             else:
-                update = einsum(diff, mask, "pos f d, f c -> pos c d")
+                every = slice(None)
+                update = masked(c, mask, every) - masked(k, mask, every)
             if act.ndim == 4:
                 if act.shape[2] == len(cols):
-                    act[0] += update
+                    act += update
                 else:  # K/V inputs ungrouped to one per head: each head reads its KV group's column
-                    act[0] += update.repeat_interleave(act.shape[2] // len(cols), dim=1)
+                    act += update.repeat_interleave(act.shape[2] // len(cols), dim=2)
             else:
-                act[0] += update[:, 0]
+                act += update[:, :, 0]
             return act
         return hook
 
     @torch.inference_mode()
     def run(self, tokens: torch.Tensor, corrupted: torch.Tensor, edges: torch.Tensor, attention_mask=None) -> torch.Tensor:
-        """Logits on the clean input with every edge outside ``edges`` (an (n_forward, n_backward) bool
-        tensor) patched to the corrupted outputs from ``corrupted_outputs``."""
-        cur = torch.zeros_like(corrupted)
+        """Logits on the clean input, one row per circuit in ``edges`` ((batch,) n_forward, n_backward
+        bool), with every edge outside the circuit patched to the corrupted outputs from
+        ``corrupted_outputs``."""
+        edges = edges if edges.ndim == 3 else edges[None]
+        batch = len(edges)
+        cur = torch.zeros((batch,) + corrupted.shape[1:], device=corrupted.device, dtype=corrupted.dtype)
         patch = (~edges).to(corrupted.dtype)
         hooks = [(name, self._store_hook(cur, i, head)) for name, i, head in self.out_hooks]
         hooks += [(name, self._input_hook(cur, corrupted, patch, prev, cols)) for name, prev, cols in self.in_hooks]
+        mask = None if attention_mask is None else attention_mask.expand(batch, -1)
         with self.model.hooks(fwd_hooks=hooks):
-            return self.model(tokens, attention_mask=attention_mask)
+            return self.model(tokens.expand(batch, -1), attention_mask=mask)

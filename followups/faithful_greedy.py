@@ -28,8 +28,10 @@ from followups.common import TASKS, eval_datasets, load_model, train_examples, w
 from followups.sufficiency import all_units, matched_random
 
 THRESHOLD = 0.85
-GRID_POINTS = 24
-BISECTIONS = 5
+GRID_POINTS = 16
+BISECTIONS = 4
+MAX_BATCH = 8
+BUFFER_BYTES = 6e9  # per batch of circuits: the (batch, pos, n_forward, d_model) output buffer
 N_CONTROLS = 5
 
 
@@ -55,8 +57,10 @@ class Task:
         totals = np.zeros(len(circuits))
         for clean, corrupted, clean_mask, corrupted_mask, metric in self.inputs:
             corr = self.patcher.corrupted_outputs(corrupted, corrupted_mask)
-            for i, edges in enumerate(circuits):
-                totals[i] += float(metric(self.patcher.run(clean, corr, edges, clean_mask)))
+            batch = int(min(MAX_BATCH, max(1, BUFFER_BYTES // (corr.numel() * corr.element_size()))))
+            for start in range(0, len(circuits), batch):
+                logits = self.patcher.run(clean, corr, torch.stack(circuits[start:start + batch]), clean_mask)
+                totals[start:start + len(logits)] += [float(metric(row[None])) for row in logits]
         return list((totals / len(self.inputs) - self.none) / (self.full - self.none))
 
 
@@ -125,7 +129,7 @@ def main():
         base, total = evaluate_accuracy(model, train, task)
         ablated, _ = evaluate_accuracy_with_ablation(model, train, task, nodes)
         rng, units = random.Random(args.seed), all_units(model, "head_mlp")
-        controls = [evaluate_accuracy_with_ablation(model, train, task, sorted(matched_random(units, nodes, rng)))[0]
+        controls = [evaluate_accuracy_with_ablation(model, train, task, list(matched_random(units, nodes, rng)))[0]
                     for _ in range(N_CONTROLS)]
         out["tasks"][task] = dict(**found, n_nodes=len(nodes), full_metric=tasks[task].full, none_metric=tasks[task].none,
                                   nodes=[str(c) for c in nodes], edges=np.argwhere(edges).tolist(),

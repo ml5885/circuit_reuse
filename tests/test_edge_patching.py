@@ -140,3 +140,17 @@ def test_faithful_search_finds_smallest_passing_size():
     assert found["faithfulness"] >= THRESHOLD
     below = [f for n, f in found["curve"] if n < found["n_edges"]]
     assert max(below) < THRESHOLD
+
+
+@pytest.mark.parametrize("cfg", CONFIGS)
+def test_batched_circuits_match_single_runs(cfg):
+    model = tiny_model(**cfg)
+    graph = Graph.from_model(model)
+    patcher = EdgePatcher(model, graph)
+    rng = np.random.default_rng(0)
+    valid = np.arange(graph.n_forward)[:, None] < column_parents(graph)[None, :]
+    circuits = torch.as_tensor(np.stack([valid & (rng.random(valid.shape) < p) for p in (.2, .5, .8)]))
+    corr = patcher.corrupted_outputs(CORRUPTED)
+    batched = patcher.run(CLEAN, corr, circuits)
+    for i, edges in enumerate(circuits):
+        torch.testing.assert_close(batched[i:i + 1], patcher.run(CLEAN, corr, edges))
