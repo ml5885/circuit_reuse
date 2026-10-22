@@ -17,12 +17,19 @@ CORRUPTED = torch.tensor([[0, 4, 1, 7, 8, 6]])
 STEPS = 5
 
 
-def tiny_model(n_kv_heads: int | None) -> HookedTransformer:
+def tiny_model(n_kv_heads: int | None, post_norm: bool = False) -> HookedTransformer:
+    """A small random model; ``post_norm`` gives it Gemma-2's normalization of the summed head outputs,
+    with non-trivial norm weights."""
     torch.manual_seed(0)
     cfg = HookedTransformerConfig(n_layers=3, d_model=16, n_ctx=16, d_head=4, n_heads=4, d_mlp=32, d_vocab=12,
-                                  act_fn="gelu", normalization_type="LN", positional_embedding_type="rotary",
-                                  n_key_value_heads=n_kv_heads, device="cpu", dtype=torch.float64)
-    return HookedTransformer(cfg)
+                                  act_fn="gelu", normalization_type="RMS" if post_norm else "LN",
+                                  positional_embedding_type="rotary", n_key_value_heads=n_kv_heads,
+                                  use_normalization_before_and_after=post_norm, device="cpu", dtype=torch.float64)
+    model = HookedTransformer(cfg)
+    if post_norm:
+        for block in model.blocks:
+            block.ln1_post.w.data = torch.rand_like(block.ln1_post.w) + .5
+    return model
 
 
 def metric(logits, *args):
@@ -45,9 +52,10 @@ def edge_scores(model) -> tuple[CircuitExtractor, torch.Tensor]:
     return ex, attribute_single_example_ig(model, ex.graph, metric, CLEAN, CORRUPTED, buf, steps=STEPS)
 
 
+@pytest.mark.parametrize("post_norm", [False, True])
 @pytest.mark.parametrize("n_kv_heads", [None, 2])
-def test_signed_edge_sum_is_node_attribution(n_kv_heads):
-    model = tiny_model(n_kv_heads)
+def test_signed_edge_sum_is_node_attribution(n_kv_heads, post_norm):
+    model = tiny_model(n_kv_heads, post_norm)
     ex, scores = edge_scores(model)
     node_ex = CircuitExtractor(model, method="eap_ig", granularity="head_mlp", ig_steps=STEPS, node_scores=True)
     node_ex._prepare_paired_inputs = paired_inputs

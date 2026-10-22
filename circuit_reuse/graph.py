@@ -236,7 +236,22 @@ class Edge:
         self.name = f"{parent.name}->{child.name}" + (f"<{qkv}>" if qkv else "")
 
 
-def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Tensor, scores: Tensor):
+def norm_cache_hooks(model: HookedTransformer, cache: dict) -> list:
+    """Forward hooks that keep each layer's post-attention RMSNorm input, as its normalized value and
+    scale, for models that normalize the summed head outputs (Gemma-2)."""
+    def store(key, act, hook):
+        cache[key] = act.detach()
+    return [(f"blocks.{l}.ln1_post.{part}", partial(store, (l, part)))
+            for l in range(model.cfg.n_layers) for part in ("hook_normalized", "hook_scale")]
+
+
+def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Tensor, scores: Tensor,
+               norm_cache: Optional[dict] = None):
+    """Hooks that fill ``activation_difference`` and accumulate edge scores into ``scores``. With
+    ``norm_cache`` (filled by ``norm_cache_hooks`` during the gradient forward), a head's edges into a
+    later node are scored through the post-attention norm: its activation difference is dotted with
+    the norm's vector-Jacobian product of the node's input gradient, so that summing a head's
+    outgoing edges gives its node attribution."""
 
     def activation_hook(index, activations, hook, add: bool = True, head_index: Optional[int] = None):
         seq_len = activations.shape[1]
@@ -262,6 +277,20 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
             act_diff_slice, grads,
             "batch pos fwd hidden, batch pos bwd hidden -> fwd bwd",
         )
+        if norm_cache is not None:
+            dtype = torch.promote_types(grads.dtype, torch.float32)
+            for layer in range(model.cfg.n_layers):
+                start = 1 + layer * (n_heads + 1)
+                if start + n_heads > prev_index:
+                    break
+                xhat = norm_cache[layer, "hook_normalized"][:, :seq_len, None].to(dtype)
+                rms = norm_cache[layer, "hook_scale"][:, :seq_len, None].to(dtype)
+                wg = grads.to(dtype) * model.blocks[layer].ln1_post.w.to(dtype)
+                vjp = (wg - xhat * (xhat * wg).sum(-1, keepdim=True) / wg.shape[-1]) / rms
+                s[start:start + n_heads] = einsum(
+                    act_diff_slice[:, :, start:start + n_heads].to(dtype), vjp,
+                    "batch pos fwd hidden, batch pos bwd hidden -> fwd bwd",
+                ).to(s.dtype)
         scores[:prev_index, bwd_index_slice] += s
 
     n_heads = graph.cfg["n_heads"]
@@ -312,15 +341,17 @@ def attribute_single_example(
     scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=torch.float32)
     activation_difference.zero_()
 
+    norm_cache = {} if model.cfg.use_normalization_before_and_after else None
     fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(
-        model, graph, activation_difference, scores
+        model, graph, activation_difference, scores, norm_cache
     )
+    norm_hooks = norm_cache_hooks(model, norm_cache) if norm_cache is not None else []
 
     with torch.no_grad():
         with model.hooks(fwd_hooks=fwd_hooks_corrupted):
             corrupted_logits = model(corrupted_tokens, attention_mask=corrupted_attention_mask)
 
-    with model.hooks(fwd_hooks=fwd_hooks_clean, bwd_hooks=bwd_hooks):
+    with model.hooks(fwd_hooks=fwd_hooks_clean + norm_hooks, bwd_hooks=bwd_hooks):
         logits = model(clean_tokens, attention_mask=clean_attention_mask)
         metric_value = metric(logits, corrupted_logits, None, None)
         metric_value.backward()
@@ -353,9 +384,11 @@ def attribute_single_example_ig(
     scores = torch.zeros((graph.n_forward, graph.n_backward), device=model.cfg.device, dtype=torch.float32)
     activation_difference.zero_()
 
+    norm_cache = {} if model.cfg.use_normalization_before_and_after else None
     fwd_hooks_corrupted, fwd_hooks_clean, bwd_hooks = make_hooks(
-        model, graph, activation_difference, scores
+        model, graph, activation_difference, scores, norm_cache
     )
+    norm_hooks = norm_cache_hooks(model, norm_cache) if norm_cache is not None else []
     input_index = graph.forward_index(graph.nodes["input"])
     # Slice to this example's actual sequence length — the work buffer is
     # reused across examples and may be longer than clean_tokens, which would
@@ -383,7 +416,7 @@ def attribute_single_example_ig(
     for step in range(steps):
         alpha = step / steps
         with model.hooks(
-            fwd_hooks=[(graph.nodes["input"].out_hook, input_interpolation_hook(alpha))],
+            fwd_hooks=[(graph.nodes["input"].out_hook, input_interpolation_hook(alpha))] + norm_hooks,
             bwd_hooks=bwd_hooks,
         ):
             logits = model(clean_tokens, attention_mask=clean_attention_mask)
