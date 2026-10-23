@@ -156,3 +156,18 @@ def test_check_passes_on_matching_caches(tmp_path):
                  tmp_path / "rules" / "abs_sum" / "toy.jsonl")
     assert not check(tmp_path / "toy.edges.npy", tmp_path / "rules" / "greedy" / "toy.jsonl",
                      tmp_path / "rules" / "abs_sum" / "toy.jsonl", min_rho=0.99)
+
+
+def test_logit_diff_reads_the_first_differing_answer_token():
+    from types import SimpleNamespace
+    from circuit_reuse.dataset import Example
+    model = tiny_model(None)
+    model.to_tokens = lambda s, prepend_bos=True: torch.tensor([[0] * prepend_bos + [int(t) for t in s.split()]])
+    model.tokenizer = SimpleNamespace(pad_token_id=0, eos_token_id=0, padding_side="right")
+    ex = CircuitExtractor(model, method="eap_ig", granularity="head_mlp", task_metric="logit_diff")
+    clean, _, _, _, metric, _ = ex._prepare_paired_inputs(Example("1 2 3", "4 5 6", "1 2 7", "4 9 6"))
+    logits = model(clean)
+    # BOS + 3 prompt tokens; the answers first differ at their second token, read at position 3 + 1
+    assert float(metric(logits)) == pytest.approx(float(logits[0, 4, 5] - logits[0, 4, 9]))
+    with pytest.raises(ValueError):
+        ex._prepare_paired_inputs(Example("1 2 3", "4 5", "1 2 7", "4 5 6"))

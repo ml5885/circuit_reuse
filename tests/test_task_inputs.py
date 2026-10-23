@@ -98,3 +98,14 @@ def test_answer_tokens_and_equal_lengths(model_name, task):
         if task in LABEL_TASKS:
             firsts = {encode(" " + label)[0] for label in ex.labels}
             assert len(firsts) == len(ex.labels)
+
+
+@pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize("task", TASKS)
+def test_answers_differ_at_some_token(model_name, task):
+    """The logit-difference metric compares the gold and counterfactual answers at their first
+    differing token, so every pair must have one within the shorter answer."""
+    tok = tokenizer(model_name)
+    encode = lambda s: tok(s, add_special_tokens=False)["input_ids"]
+    for ex in examples(task, model_name, n=500):
+        assert any(a != b for a, b in zip(encode(ex.target), encode(ex.corrupted_target))), (ex.target, ex.corrupted_target)

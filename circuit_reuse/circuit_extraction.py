@@ -82,7 +82,7 @@ class CircuitExtractor:
         self.ig_steps = int(ig_steps)
         # Extraction callers use this to make incomplete runs fail loudly.
         self.last_skipped_examples = 0
-        if self.task_metric not in ("logprob", "kl"):
+        if self.task_metric not in ("logprob", "logit_diff", "kl"):
             raise ValueError(f"Unknown task_metric: {self.task_metric}")
 
         if method in ("eap", "eap_ig"):
@@ -113,8 +113,12 @@ class CircuitExtractor:
         else:
             disable_lrp(model)
 
-    def _get_metric_fn(self, positions: torch.Tensor, target_ids: torch.Tensor):
+    def _get_metric_fn(self, positions: torch.Tensor, target_ids: torch.Tensor, contrast=None):
+        """``contrast`` = (position, gold id, counterfactual id) for ``logit_diff``."""
         def metric(logits: torch.Tensor, corrupted_logits=None, input_lengths=None, label=None) -> torch.Tensor:
+            if self.task_metric == "logit_diff":
+                pos, gold, other = contrast
+                return logits[0, pos, gold] - logits[0, pos, other]
             logits_slice = logits[0, positions, :]
             if self.task_metric == "logprob":
                 logprobs = logits_slice.log_softmax(dim=-1)
@@ -171,7 +175,10 @@ class CircuitExtractor:
         corrupted_attention_mask = torch.zeros((1, max_len), device=device, dtype=torch.long)
         corrupted_attention_mask[:, :corrupted_len] = 1
 
-        metric = self._get_metric_fn(positions=positions, target_ids=target_ids)
+        contrast = None
+        if self.task_metric == "logit_diff":
+            contrast = self._first_difference(gold_ids_list, corrupted_target_tok[0].tolist(), prompt_len, example)
+        metric = self._get_metric_fn(positions=positions, target_ids=target_ids, contrast=contrast)
         return (
             clean_tokens,
             corrupted_tokens,
@@ -180,6 +187,18 @@ class CircuitExtractor:
             metric,
             max_len,
         )
+
+    @staticmethod
+    def _first_difference(gold: list, other: list, prompt_len: int, example: Example) -> tuple:
+        """Logit difference contrast at the first answer token where the gold and counterfactual
+        answers differ, with the shared prefix teacher-forced: for single-token answers this is the
+        usual logit difference between the two answers (as in MIB), and for multi-token numbers it is
+        the first digit token that tells them apart."""
+        d = next((i for i, (a, b) in enumerate(zip(gold, other)) if a != b), None)
+        if d is None:
+            raise ValueError(f"gold and counterfactual answers share every token up to the shorter one's length: "
+                             f"{example.target!r} vs {example.corrupted_target!r}")
+        return prompt_len - 1 + d, gold[d], other[d]
 
     # --- EAP edge-level machinery ------------------------------------------
 

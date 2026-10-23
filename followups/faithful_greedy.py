@@ -1,7 +1,8 @@
 """The circuit-discovery pipeline of Hanna et al. (2024) on our EAP-IG edge scores: for each task,
 average the saved edge scores over the training examples, grow a greedy circuit from the logits, and
 keep the smallest circuit whose edge-patching faithfulness, (m - b') / (b - b') on the gold answer's
-log-probability, reaches 0.85 on the task's 100 cross-task evaluation examples.
+log-probability (or, with --task-metric logit_diff, the logit difference),
+reaches 0.85 on the task's 100 cross-task evaluation examples.
 
 Circuit sizes are swept on a geometric grid of edge counts and then refined by bisection between the
 largest grid size below the threshold and the smallest above it. For each circuit the script also
@@ -21,7 +22,7 @@ import numpy as np
 import torch
 
 from circuit_reuse.circuit_extraction import CircuitExtractor, Component
-from circuit_reuse.edge_patching import EdgePatcher, circuit_nodes, column_parents, greedy_order, prune
+from circuit_reuse.edge_patching import EdgePatcher, circuit_nodes, greedy_order, layout, prune
 from circuit_reuse.evaluate import evaluate_accuracy, evaluate_accuracy_with_ablation
 from circuit_reuse.graph import AttentionNode
 from followups.common import TASKS, eval_datasets, load_model, train_examples, write_json
@@ -64,16 +65,21 @@ class Task:
         return list((totals / len(self.inputs) - self.none) / (self.full - self.none))
 
 
-def mask_of(order: np.ndarray, n: int, graph) -> np.ndarray:
-    edges = np.zeros((graph.n_forward, graph.n_backward), dtype=bool)
+def mask_of(order: np.ndarray, n: int, lay: dict, n_bwd: int) -> np.ndarray:
+    edges = np.zeros((lay["n_forward"], n_bwd), dtype=bool)
     edges[order[:n, 0], order[:n, 1]] = True
-    return prune(edges, graph)
+    return prune(edges, lay)
 
 
-def find_circuit(task: Task, order: np.ndarray, graph, device) -> dict:
+def find_circuit(task: Task, order: np.ndarray, lay: dict, n_bwd: int, device) -> dict:
     """Faithfulness over a geometric grid of edge counts, then bisection to the smallest count at or
-    above the threshold."""
-    to_torch = lambda n: torch.from_numpy(mask_of(order, n, graph)).to(device)
+    above the threshold. The curve records, for each edge count, the faithfulness and the number of
+    heads and MLP blocks the pruned circuit touches."""
+    masks = {}
+
+    def to_torch(n):
+        masks[n] = mask_of(order, n, lay, n_bwd)
+        return torch.from_numpy(masks[n]).to(device)
     grid = sorted({int(n) for n in np.geomspace(30, len(order), GRID_POINTS)} | {len(order)})
     curve = dict(zip(grid, task.faithfulness([to_torch(n) for n in grid])))
     passing = [n for n in grid if curve[n] >= THRESHOLD]
@@ -90,7 +96,8 @@ def find_circuit(task: Task, order: np.ndarray, graph, device) -> dict:
         n_star = hi
     else:
         n_star = len(order)
-    return dict(n_edges=n_star, faithfulness=curve[n_star], curve=sorted(curve.items()))
+    nodes = {n: int(m.any(1)[1:].sum()) for n, m in masks.items()}
+    return dict(n_edges=n_star, faithfulness=curve[n_star], curve=[[n, f, nodes[n]] for n, f in sorted(curve.items())])
 
 
 def main():
@@ -102,26 +109,29 @@ def main():
     parser.add_argument("--num-examples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tasks", default=",".join(TASKS))
+    parser.add_argument("--task-metric", default="logprob", choices=["logprob", "logit_diff"])
     args = parser.parse_args()
     task_list = args.tasks.split(",")
 
     model = load_model(args.model)
-    extractor = CircuitExtractor(model, method="eap_ig", granularity="head_mlp")
+    extractor = CircuitExtractor(model, method="eap_ig", granularity="head_mlp", task_metric=args.task_metric)
     graph = extractor.graph
     patcher = EdgePatcher(model, graph)
     device = model.cfg.device
     slug = args.model.replace("/", "_")
-    n_valid = int(column_parents(graph).sum())
+    lay = layout(graph.index_names())
+    n_valid = int(lay["prev"].sum())
     evals = eval_datasets(args.model)
-    tasks, circuits, out = {}, {}, {"model": args.model, "threshold": THRESHOLD, "n_edges_total": n_valid, "tasks": {}}
+    tasks, circuits, out = {}, {}, {"model": args.model, "threshold": THRESHOLD, "task_metric": args.task_metric,
+                                     "n_edges_total": n_valid, "n_nodes_total": len(all_units(model, "head_mlp")), "tasks": {}}
 
     for task in task_list:
         path = next(Path(args.edges_dir).glob(f"{slug}__none__{task}__eap_ig__*.edges.npy"))
         mean = np.load(path, mmap_mode="r").mean(0, dtype=np.float64)
-        order = greedy_order(mean, graph, n_valid)
+        order = greedy_order(mean, lay, n_valid)
         tasks[task] = Task(extractor, patcher, evals[task])
-        found = find_circuit(tasks[task], order, graph, device)
-        edges = mask_of(order, found["n_edges"], graph)
+        found = find_circuit(tasks[task], order, lay, graph.n_backward, device)
+        edges = mask_of(order, found["n_edges"], lay, graph.n_backward)
         circuits[task] = torch.from_numpy(edges).to(device)
         nodes = [component(n) for n in circuit_nodes(edges, graph)]
 

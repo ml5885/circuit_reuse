@@ -7,7 +7,7 @@ import pytest
 import torch
 from transformer_lens import HookedTransformer, HookedTransformerConfig
 
-from circuit_reuse.edge_patching import EdgePatcher, column_parents, greedy_order, prune
+from circuit_reuse.edge_patching import EdgePatcher, column_parents, greedy_order, layout, prune
 from circuit_reuse.graph import Graph
 
 REF_ROOT = Path(__file__).resolve().parent.parent / "reference_code" / "EAP-IG" / "src"
@@ -94,13 +94,13 @@ def test_greedy_and_prune_match_reference(gpt2, ref):
     scores = torch.randn(graph.n_forward, graph.n_backward, generator=torch.Generator().manual_seed(0))
     ref_graph.scores[:] = scores
     for n in (40, 300):
-        order = greedy_order(scores.numpy(), graph, n)
+        order = greedy_order(scores.numpy(), layout(graph.index_names()), n)
         ours = np.zeros((graph.n_forward, graph.n_backward), dtype=bool)
         ours[order[:, 0], order[:, 1]] = True
         ref_graph.apply_greedy(n, absolute=True, prune=False)
         np.testing.assert_array_equal(ours, ref_graph.in_graph.numpy())
         ref_graph.prune()
-        np.testing.assert_array_equal(prune(ours, graph), ref_graph.in_graph.numpy())
+        np.testing.assert_array_equal(prune(ours, layout(graph.index_names())), ref_graph.in_graph.numpy())
 
 
 def test_edge_patching_matches_reference(gpt2, ref):
@@ -129,16 +129,16 @@ def test_faithful_search_finds_smallest_passing_size():
     from followups.faithful_greedy import THRESHOLD, find_circuit
     model = tiny_model()
     graph = Graph.from_model(model)
-    order = greedy_order(np.random.default_rng(0).standard_normal((graph.n_forward, graph.n_backward)), graph,
-                         int(column_parents(graph).sum()))
+    order = greedy_order(np.random.default_rng(0).standard_normal((graph.n_forward, graph.n_backward)),
+                         layout(graph.index_names()), int(column_parents(graph).sum()))
 
     class Fake:  # faithfulness grows with the number of edges the pruned circuit keeps
         def faithfulness(self, circuits):
             return [float(c.sum()) / len(order) * 1.3 for c in circuits]
 
-    found = find_circuit(Fake(), order, graph, "cpu")
+    found = find_circuit(Fake(), order, layout(graph.index_names()), graph.n_backward, "cpu")
     assert found["faithfulness"] >= THRESHOLD
-    below = [f for n, f in found["curve"] if n < found["n_edges"]]
+    below = [f for n, f, _ in found["curve"] if n < found["n_edges"]]
     assert max(below) < THRESHOLD
 
 
@@ -154,3 +154,9 @@ def test_batched_circuits_match_single_runs(cfg):
     batched = patcher.run(CLEAN, corr, circuits)
     for i, edges in enumerate(circuits):
         torch.testing.assert_close(batched[i:i + 1], patcher.run(CLEAN, corr, edges))
+
+
+def test_layout_from_names_matches_graph():
+    model = tiny_model(2)
+    graph = Graph.from_model(model)
+    np.testing.assert_array_equal(layout(graph.index_names())["prev"], column_parents(graph))

@@ -102,9 +102,10 @@ def parse_args() -> argparse.Namespace:
         "--task-metric",
         type=str,
         default="logprob",
-        choices=["logprob", "kl"],
+        choices=["logprob", "logit_diff", "kl"],
         help="Scalar task metric used for attribution. `logprob` sums gold-token log-probs "
-             "over the clean continuation; `kl` uses KL divergence to the paired reference logits.",
+             "over the clean continuation; `logit_diff` is the gold minus the counterfactual answer's "
+             "logit at their first differing token; `kl` uses KL divergence to the paired reference logits.",
     )
     parser.add_argument(
         "--use-lrp",

@@ -29,24 +29,35 @@ def column_parents(graph: Graph) -> np.ndarray:
     return prev
 
 
-def greedy_order(scores: np.ndarray, graph: Graph, n_max: int) -> np.ndarray:
+def layout(names: dict) -> dict:
+    """The score matrix's layout from its saved row and column names (Graph.index_names): the nodes
+    each column feeds and how many forward nodes can feed each column."""
+    forward = {n: i for i, n in enumerate(names["forward"])}
+    prev = [len(forward) if col == "logits" else forward[col.split("<")[0].split(".")[0] + ".h0"] if col.startswith("a")
+            else forward[col] for col in names["backward"]]
+    return {"children": names["backward_children"], "prev": np.array(prev), "n_forward": len(forward)}
+
+
+def greedy_order(scores: np.ndarray, lay: dict, n_max: int) -> np.ndarray:
     """The first ``n_max`` (forward, backward) edges a greedy search from the logits picks: at each step,
     the edge with the largest |score| among the edges into the current circuit, whose parent then
-    joins the circuit and opens its own input columns (EAP-IG's apply_greedy, absolute scores)."""
+    joins the circuit and opens its own input columns (EAP-IG's apply_greedy, absolute scores).
+    ``lay`` comes from ``layout``."""
     mag = np.abs(scores)
-    prev = column_parents(graph)
-    feeds = [[] for _ in range(graph.n_forward)]
-    for b, kids in enumerate(graph.index_names()["backward_children"]):
+    n_fwd, n_bwd = mag.shape
+    prev = lay["prev"]
+    feeds = [[] for _ in range(n_fwd)]
+    for b, kids in enumerate(lay["children"]):
         for f in kids:
             feeds[f].append(b)
-    heap, opened, in_circuit, order = [], np.zeros(graph.n_backward, dtype=bool), np.zeros(graph.n_forward, dtype=bool), []
+    heap, opened, in_circuit, order = [], np.zeros(n_bwd, dtype=bool), np.zeros(n_fwd, dtype=bool), []
 
     def open_column(b: int):
         opened[b] = True
         for f in range(prev[b]):
             heapq.heappush(heap, (-mag[f, b], f, b))
 
-    open_column(graph.n_backward - 1)
+    open_column(n_bwd - 1)
     while heap and len(order) < n_max:
         _, f, b = heapq.heappop(heap)
         order.append((f, b))
@@ -58,12 +69,13 @@ def greedy_order(scores: np.ndarray, graph: Graph, n_max: int) -> np.ndarray:
     return np.array(order, dtype=np.int64).reshape(-1, 2)
 
 
-def prune(edges: np.ndarray, graph: Graph) -> np.ndarray:
+def prune(edges: np.ndarray, lay: dict) -> np.ndarray:
     """Drop nodes without an incoming or an outgoing circuit edge, and their edges, until nothing
     changes. Such edges carry corrupted values either way, so pruning never changes the patched run."""
     edges = edges.copy()
-    children = graph.index_names()["backward_children"]
-    feeds = np.zeros((graph.n_forward, graph.n_backward), dtype=bool)
+    children = lay["children"]
+    n_fwd, n_bwd = edges.shape
+    feeds = np.zeros((n_fwd, n_bwd), dtype=bool)
     for b, kids in enumerate(children):
         feeds[kids, b] = True
     while True:
@@ -71,7 +83,7 @@ def prune(edges: np.ndarray, graph: Graph) -> np.ndarray:
         has_in = (edges.any(0)[None, :] & feeds).any(1)
         has_in[0] = True  # the input node
         nodes = has_out & has_in
-        alive_col = np.array([b == graph.n_backward - 1 or nodes[kids].any() for b, kids in enumerate(children)])
+        alive_col = np.array([b == n_bwd - 1 or nodes[kids].any() for b, kids in enumerate(children)])
         pruned = edges & nodes[:, None] & alive_col[None, :]
         if (pruned == edges).all():
             return edges
