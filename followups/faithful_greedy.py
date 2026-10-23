@@ -5,7 +5,8 @@ log-probability (or, with --task-metric logit_diff, the logit difference),
 reaches 0.85 on the task's 100 cross-task evaluation examples.
 
 Circuit sizes are swept on a geometric grid of edge counts and then refined by bisection between the
-largest grid size below the threshold and the smallest above it. For each circuit the script also
+largest grid size below the threshold and the smallest above it. As a control, greedy circuits grown
+on random edge scores are scored at the same grid sizes. For each circuit the script also
 records its nodes, the necessity of those nodes (zero ablation against random sets of the same
 composition, on the training examples), and its faithfulness on every other task (Hanna et al.'s
 cross-task faithfulness). It writes one JSON per model and a metrics.json per task that
@@ -34,6 +35,7 @@ BISECTIONS = 4
 MAX_BATCH = 8
 BUFFER_BYTES = 6e9  # per batch of circuits: the (batch, pos, n_forward, d_model) output buffer
 N_CONTROLS = 5
+RANDOM_SEEDS = 3
 
 
 def component(node) -> Component:
@@ -97,7 +99,22 @@ def find_circuit(task: Task, order: np.ndarray, lay: dict, n_bwd: int, device) -
     else:
         n_star = len(order)
     nodes = {n: int(m.any(1)[1:].sum()) for n, m in masks.items()}
-    return dict(n_edges=n_star, faithfulness=curve[n_star], curve=[[n, f, nodes[n]] for n, f in sorted(curve.items())])
+    return dict(n_edges=n_star, faithfulness=curve[n_star], grid=grid,
+                curve=[[n, f, nodes[n]] for n, f in sorted(curve.items())])
+
+
+def random_curve(task: Task, lay: dict, n_bwd: int, grid: list, device, seed: int = 0) -> list:
+    """The control: greedy circuits grown from the logits on random edge scores, so they are connected
+    like the Mean Greedy circuit but pick edges at random, at the same edge counts. Each point is the
+    mean and standard deviation of faithfulness, and the mean number of nodes, over RANDOM_SEEDS seeds."""
+    rng = np.random.default_rng(seed)
+    n_valid = int(lay["prev"].sum())
+    masks = {(s, n): mask_of(greedy_order(rng.random((lay["n_forward"], n_bwd)), lay, max(grid)), n, lay, n_bwd)
+             for s in range(RANDOM_SEEDS) for n in grid if n <= n_valid}
+    keys = list(masks)
+    faith = dict(zip(keys, task.faithfulness([torch.from_numpy(masks[k]).to(device) for k in keys])))
+    return [[n, float(np.mean([faith[s, n] for s in range(RANDOM_SEEDS)])), float(np.std([faith[s, n] for s in range(RANDOM_SEEDS)])),
+             float(np.mean([masks[s, n].any(1)[1:].sum() for s in range(RANDOM_SEEDS)]))] for n in grid if (0, n) in masks]
 
 
 def main():
@@ -132,6 +149,7 @@ def main():
         tasks[task] = Task(extractor, patcher, evals[task])
         found = find_circuit(tasks[task], order, lay, graph.n_backward, device)
         edges = mask_of(order, found["n_edges"], lay, graph.n_backward)
+        found["random_curve"] = random_curve(tasks[task], lay, graph.n_backward, found.pop("grid"), device, seed=args.seed)
         circuits[task] = torch.from_numpy(edges).to(device)
         nodes = [component(n) for n in circuit_nodes(edges, graph)]
 

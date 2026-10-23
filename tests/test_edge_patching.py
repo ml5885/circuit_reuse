@@ -160,3 +160,19 @@ def test_layout_from_names_matches_graph():
     model = tiny_model(2)
     graph = Graph.from_model(model)
     np.testing.assert_array_equal(layout(graph.index_names())["prev"], column_parents(graph))
+
+
+def test_random_curve_covers_the_grid():
+    from followups.faithful_greedy import RANDOM_SEEDS, random_curve
+    model = tiny_model()
+    graph = Graph.from_model(model)
+    lay = layout(graph.index_names())
+
+    class Fake:
+        def faithfulness(self, circuits):
+            return [float(c.sum()) for c in circuits]
+
+    grid = [5, 20, 80]
+    curve = random_curve(Fake(), lay, graph.n_backward, grid, "cpu")
+    assert [c[0] for c in curve] == grid
+    assert all(c[1] > 0 and c[3] >= 1 for c in curve) and curve[0][1] < curve[-1][1]
