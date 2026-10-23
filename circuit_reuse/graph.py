@@ -263,6 +263,17 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
         else:
             activation_difference[:, :seq_len, index, :] -= acts
 
+    def head_activation_hook(index, layer, z, hook, add: bool = True):
+        """A layer's per-head outputs from hook_z, as z times each head's slice of W_O. TransformerLens's
+        hook_result gives the same values but materializes (batch, pos, head, d_head, d_model)."""
+        acts = einsum(z.detach(), model.blocks[layer].attn.W_O,
+                      "batch pos head d_head, head d_head model -> batch pos head model")
+        seq_len = acts.shape[1]
+        if add:
+            activation_difference[:, :seq_len, index:index + acts.shape[2]] += acts
+        else:
+            activation_difference[:, :seq_len, index:index + acts.shape[2]] -= acts
+
     def gradient_hook(prev_index: int, bwd_index_slice: slice, gradients: Tensor, hook, n_bwd: Optional[int] = None):
         seq_len = gradients.shape[1]
         grads = gradients.detach()
@@ -300,11 +311,15 @@ def make_hooks(model: HookedTransformer, graph: Graph, activation_difference: Te
     processed_attn_layers = set()
     for name, node in graph.nodes.items():
         # Forward hooks: all non-logit nodes
-        if not isinstance(node, LogitNode):
+        if isinstance(node, AttentionNode):
+            if node.head == 0:
+                z_hook, fwd_idx = f"blocks.{node.layer}.attn.hook_z", graph.forward_index(node)
+                fwd_hooks_corrupted.append((z_hook, partial(head_activation_hook, fwd_idx, node.layer, add=True)))
+                fwd_hooks_clean.append((z_hook, partial(head_activation_hook, fwd_idx, node.layer, add=False)))
+        elif not isinstance(node, LogitNode):
             fwd_idx = graph.forward_index(node)
-            head_idx = node.head if isinstance(node, AttentionNode) else None
-            fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_idx, add=True, head_index=head_idx)))
-            fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_idx, add=False, head_index=head_idx)))
+            fwd_hooks_corrupted.append((node.out_hook, partial(activation_hook, fwd_idx, add=True)))
+            fwd_hooks_clean.append((node.out_hook, partial(activation_hook, fwd_idx, add=False)))
 
         # Backward hooks
         if isinstance(node, AttentionNode):

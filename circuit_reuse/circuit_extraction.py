@@ -105,7 +105,9 @@ class CircuitExtractor:
 
         # Enable TL hooks needed for component-level scoring
         self.model.cfg.use_split_qkv_input = True
-        self.model.cfg.use_attn_result = True
+        # Head outputs are read at hook_z (z @ W_O); hook_result would materialize a
+        # (batch, pos, head, d_head, d_model) tensor on every forward pass.
+        self.model.cfg.use_attn_result = False
         self.model.cfg.use_hook_mlp_in = True
 
         if self.use_lrp:
