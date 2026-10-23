@@ -176,3 +176,23 @@ def test_random_curve_covers_the_grid():
     curve = random_curve(Fake(), lay, graph.n_backward, grid, "cpu")
     assert [c[0] for c in curve] == grid
     assert all(c[1] > 0 and c[3] >= 1 for c in curve) and curve[0][1] < curve[-1][1]
+
+
+def test_node_circuit_edges_and_matched_mean_greedy():
+    from circuit_reuse.circuit_extraction import Component
+    from followups.node_faithfulness import matched_mean_greedy, node_circuit_edges
+    model = tiny_model(2)
+    graph = Graph.from_model(model)
+    names = graph.index_names()
+    lay = layout(names)
+    nodes = [Component(0, "head", 1), Component(1, "mlp", 0), Component(2, "head", 3)]
+    edges = node_circuit_edges(nodes, names, lay)
+    kept = {names["forward"][f] for f in np.flatnonzero(edges.any(1))}
+    assert kept == {"input", "a0.h1", "m1", "a2.h3"}
+    # every kept edge feeds a circuit node or the logits, and none is non-causal
+    for f, b in zip(*np.nonzero(edges)):
+        assert b == graph.n_backward - 1 or set(names["backward_children"][b]) & {names["forward"].index(n) for n in kept}
+        assert f < lay["prev"][b]
+    order = greedy_order(np.random.default_rng(0).standard_normal(edges.shape), lay, int(lay["prev"].sum()))
+    matched = matched_mean_greedy(order, lay, graph.n_backward, 5)
+    assert matched.any(1)[1:].sum() >= 5
