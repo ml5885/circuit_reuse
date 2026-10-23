@@ -9,6 +9,7 @@ contribution to a later node is ln1_post of the patched sum minus ln1_post of th
 from __future__ import annotations
 
 import heapq
+from contextlib import contextmanager
 import numpy as np
 import torch
 from einops import einsum
@@ -105,16 +106,17 @@ class EdgePatcher:
         cfg = graph.cfg
         self.n_heads, self.n_kv = cfg["n_heads"], cfg["n_kv_heads"]
         self.head_layer = torch.full((graph.n_forward,), -1, dtype=torch.long, device=model.cfg.device)
-        self.out_hooks = []  # (hook name, forward index of its first node, head?)
+        self.out_hooks = []  # (hook name, forward index of its first node, layer of its heads or None)
         for node in graph.nodes.values():
             if isinstance(node, InputNode):
-                self.out_hooks.append((node.out_hook, 0, False))
+                self.out_hooks.append((node.out_hook, 0, None))
             elif isinstance(node, MLPNode):
-                self.out_hooks.append((node.out_hook, graph.forward_index(node), False))
+                self.out_hooks.append((node.out_hook, graph.forward_index(node), None))
             elif isinstance(node, AttentionNode):
                 self.head_layer[graph.forward_index(node)] = node.layer
-                if node.head == 0:
-                    self.out_hooks.append((node.out_hook, graph.forward_index(node), True))
+                if node.head == 0:  # per-head outputs from hook_z: TransformerLens's hook_result path
+                    # materializes (batch, pos, head, d_head, d_model), gigabytes on long prompts
+                    self.out_hooks.append((f"blocks.{node.layer}.attn.hook_z", graph.forward_index(node), node.layer))
         self.in_hooks = []  # (hook name, prev index, columns, per-head grouping)
         n_layers = cfg["n_layers"]
         for layer in range(n_layers):
@@ -129,12 +131,15 @@ class EdgePatcher:
         logits = graph.nodes["logits"]
         self.in_hooks.append((logits.in_hook, graph.n_forward, [graph.n_backward - 1]))
 
-    def _store_hook(self, buf: torch.Tensor, index: int, head: bool):
-        """Writes a node's output into ``buf`` (batch, pos, n_forward, d_model)."""
+    def _store_hook(self, buf: torch.Tensor, index: int, layer):
+        """Writes a node's output into ``buf`` (batch, pos, n_forward, d_model); for a layer's heads
+        (``layer`` set) the output of each head is its z times its slice of W_O."""
+        W_O = None if layer is None else self.model.blocks[layer].attn.W_O
+
         def hook(act, hook=None):
             n = act.shape[1]
-            if head:
-                buf[:, :n, index:index + self.n_heads] = act
+            if W_O is not None:
+                buf[:, :n, index:index + self.n_heads] = einsum(act, W_O, "b p h d, h d m -> b p h m")
             else:
                 buf[:, :n, index] = act
         return hook
@@ -145,9 +150,18 @@ class EdgePatcher:
         buf = torch.zeros((1, tokens.shape[1], self.graph.n_forward, self.model.cfg.d_model),
                           device=self.model.cfg.device, dtype=self.model.cfg.dtype)
         hooks = [(name, self._store_hook(buf, i, head)) for name, i, head in self.out_hooks]
-        with self.model.hooks(fwd_hooks=hooks):
+        with self.model.hooks(fwd_hooks=hooks), self._without_attn_result():
             self.model(tokens, attention_mask=attention_mask)
         return buf
+
+    @contextmanager
+    def _without_attn_result(self):
+        flag = self.model.cfg.use_attn_result
+        self.model.cfg.use_attn_result = False
+        try:
+            yield
+        finally:
+            self.model.cfg.use_attn_result = flag
 
     def _input_hook(self, cur, corr, patch, prev: int, cols: list):
         """Adds, at a node's input, the corrupted-minus-current outputs of the parents whose edge into
@@ -197,5 +211,5 @@ class EdgePatcher:
         hooks = [(name, self._store_hook(cur, i, head)) for name, i, head in self.out_hooks]
         hooks += [(name, self._input_hook(cur, corrupted, patch, prev, cols)) for name, prev, cols in self.in_hooks]
         mask = None if attention_mask is None else attention_mask.expand(batch, -1)
-        with self.model.hooks(fwd_hooks=hooks):
+        with self.model.hooks(fwd_hooks=hooks), self._without_attn_result():
             return self.model(tokens.expand(batch, -1), attention_mask=mask)
